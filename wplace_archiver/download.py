@@ -10,6 +10,8 @@ from .config import Config
 from .errors import DownloadError
 from .utils import digest_hex_from_github, sha256_file
 
+USER_AGENT = "wplace-archiver-v2"
+
 
 def download_is_valid(path: Path, expected_size: int | None = None, expected_digest: str | None = None, cfg: Config | None = None) -> bool:
     if not path.exists():
@@ -30,9 +32,9 @@ async def _download_file(session: aiohttp.ClientSession, url: str, path: Path, e
             return path
         partial = path.with_suffix(path.suffix + ".part")
         existing = partial.stat().st_size if partial.exists() else 0
-        headers = {"User-Agent": "wplace-archiver-v2"}
+        headers = {"User-Agent": USER_AGENT}
         mode = "wb"
-        if existing and expected_size and existing < expected_size:
+        if existing and expected_size is not None and existing < expected_size:
             headers["Range"] = f"bytes={existing}-"
             mode = "ab"
         async with session.get(url, headers=headers) as resp:
@@ -40,7 +42,7 @@ async def _download_file(session: aiohttp.ClientSession, url: str, path: Path, e
                 partial.unlink(missing_ok=True)
                 existing = 0
                 mode = "wb"
-                async with session.get(url, headers={"User-Agent": "wplace-archiver-v2"}) as retry_resp:
+                async with session.get(url, headers={"User-Agent": USER_AGENT}) as retry_resp:
                     retry_resp.raise_for_status()
                     await _stream_response(retry_resp, partial, mode, existing, expected_size, position)
             else:
@@ -75,7 +77,7 @@ async def _stream_response(resp: aiohttp.ClientResponse, partial: Path, mode: st
 async def download_assets_async(cfg: Config, tag: str, assets: list[dict]) -> list[Path]:
     tag_dir = cfg.download_dir / tag
     sem = asyncio.Semaphore(cfg.max_concurrent_downloads)
-    headers = {"Accept": "application/octet-stream", "User-Agent": "wplace-archiver-v2"}
+    headers = {"Accept": "application/octet-stream", "User-Agent": USER_AGENT}
     async with aiohttp.ClientSession(headers=headers) as session:
         tasks = []
         for i, asset in enumerate(assets):
