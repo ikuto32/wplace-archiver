@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import glob
 import json
-import shutil
 from pathlib import Path
 
 from .benchmark import benchmark_decompress
@@ -111,7 +110,58 @@ def clean_temp(cfg: Config) -> dict:
                     removed.append(str(p))
                 except FileNotFoundError:
                     pass
-    return {"removed": len(removed), "files": removed[:1000]}
+    return {"removed": len(removed), "files": sorted(removed)[:1000]}
+
+
+def _cmd_self_test(args, _cfg: Config) -> dict:
+    result = run_self_test()
+    if not args.json:
+        print("self-test OK")
+    return result
+
+
+def _cmd_run(args, cfg: Config) -> dict:
+    return run_pipeline(cfg, limit=args.limit, from_tag=args.from_tag, to_tag=args.to_tag, no_export=args.no_export)
+
+
+def _cmd_export(_args, cfg: Config) -> dict:
+    return export_state_to_xyz(cfg, PaletteCodec(cfg))
+
+
+def _cmd_benchmark_decompress(args, cfg: Config) -> dict:
+    parts = _expand_parts(args.parts)
+    results = []
+    backends = args.backends or [cfg.compression_backend]
+    for backend in backends:
+        if backend == "zstd":
+            run_cfg = cfg.with_overrides(compression_backend="zstd")
+        else:
+            run_cfg = cfg.with_overrides(compression_backend="gzip", gzip_backend=backend)
+        results.append(benchmark_decompress(parts, run_cfg, mode=args.mode))
+    return {"results": results}
+
+
+def _cmd_diagnose_rgb_transparency(args, cfg: Config) -> dict:
+    return diagnose_rgb_transparency(_expand_parts(args.parts), cfg, sample=args.sample, out=args.out)
+
+
+def _cmd_validate_store(_args, cfg: Config) -> dict:
+    return validate_store(cfg)
+
+
+def _cmd_clean_temp(_args, cfg: Config) -> dict:
+    return clean_temp(cfg)
+
+
+COMMAND_HANDLERS = {
+    "self-test": _cmd_self_test,
+    "run": _cmd_run,
+    "export": _cmd_export,
+    "benchmark-decompress": _cmd_benchmark_decompress,
+    "diagnose-rgb-transparency": _cmd_diagnose_rgb_transparency,
+    "validate-store": _cmd_validate_store,
+    "clean-temp": _cmd_clean_temp,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -119,47 +169,12 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     cfg = cfg_from_args(args)
     try:
-        if args.cmd == "self-test":
-            result = run_self_test()
-            if args.json:
-                _print_json(result)
-            else:
-                print("self-test OK")
-                _print_json(result)
-            return 0
-        if args.cmd == "run":
-            result = run_pipeline(cfg, limit=args.limit, from_tag=args.from_tag, to_tag=args.to_tag, no_export=args.no_export)
-            _print_json(result)
-            return 0
-        if args.cmd == "export":
-            result = export_state_to_xyz(cfg, PaletteCodec(cfg))
-            _print_json(result)
-            return 0
-        if args.cmd == "benchmark-decompress":
-            parts = _expand_parts(args.parts)
-            results = []
-            backends = args.backends or [cfg.compression_backend]
-            for backend in backends:
-                if backend == "zstd":
-                    run_cfg = cfg.with_overrides(compression_backend="zstd")
-                else:
-                    run_cfg = cfg.with_overrides(compression_backend="gzip", gzip_backend=backend)
-                results.append(benchmark_decompress(parts, run_cfg, mode=args.mode))
-            _print_json({"results": results})
-            return 0
-        if args.cmd == "diagnose-rgb-transparency":
-            result = diagnose_rgb_transparency(_expand_parts(args.parts), cfg, sample=args.sample, out=args.out)
-            _print_json(result)
-            return 0
-        if args.cmd == "validate-store":
-            result = validate_store(cfg)
-            _print_json(result)
-            return 0
-        if args.cmd == "clean-temp":
-            _print_json(clean_temp(cfg))
-            return 0
-        parser.error(f"unknown command: {args.cmd}")
-        return 2
+        handler = COMMAND_HANDLERS.get(args.cmd)
+        if handler is None:
+            parser.error(f"unknown command: {args.cmd}")
+            return 2
+        _print_json(handler(args, cfg))
+        return 0
     except Exception as exc:
         print(f"ERROR: {type(exc).__name__}: {exc}")
         return 1
