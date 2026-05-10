@@ -19,7 +19,7 @@ from tqdm import tqdm
 from .config import Config
 from .errors import ApplyError
 from .records import merge_sparse_overlay
-from .shard_store import AtomicSparseShardWriter, SparseTileStore, load_sparse_record_from_root, write_store_manifest
+from .shard_store import AtomicSparseShardWriter, SparseTileRef, SparseTileStore, load_sparse_record_from_root, write_store_manifest
 from .utils import atomic_write_json, load_json, shard_index_path, shard_name, store_manifest_path
 
 
@@ -104,12 +104,50 @@ def load_shard_tiles_as_dict(root: Path, cfg: Config, sx: int, sy: int) -> dict[
     return out
 
 
+def _chunk_tile_refs(refs: list[SparseTileRef], target_bytes: int) -> list[list[SparseTileRef]]:
+    if not refs:
+        return []
+    if target_bytes <= 0:
+        return [refs]
+    chunks: list[list[SparseTileRef]] = []
+    current: list[SparseTileRef] = []
+    current_bytes = 0
+    for ref in refs:
+        # Prefer uncompressed size estimate because decoding is the memory-heavy step.
+        ref_bytes = int(ref.uncompressed_size or ref.size)
+        if current and current_bytes + ref_bytes > target_bytes:
+            chunks.append(current)
+            current = []
+            current_bytes = 0
+        current.append(ref)
+        current_bytes += ref_bytes
+    if current:
+        chunks.append(current)
+    return chunks
+
+
 def apply_one_overlay_shard(state_root: Path, overlay_root: Path, cfg: Config, sx: int, sy: int) -> dict | None:
-    state_tiles = load_shard_tiles_as_dict(state_root, cfg, sx, sy)
-    overlay_tiles = load_shard_tiles_as_dict(overlay_root, cfg, sx, sy)
-    for key, (new_pos, new_val) in overlay_tiles.items():
-        old_pos, old_val = state_tiles.get(key, (np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.uint8)))
-        state_tiles[key] = merge_sparse_overlay(old_pos, old_val, new_pos, new_val)
+    state_store = SparseTileStore(state_root, cfg)
+    overlay_store = SparseTileStore(overlay_root, cfg)
+
+    state_refs = list(state_store.iter_refs(sx, sy))
+    overlay_refs = list(overlay_store.iter_refs(sx, sy))
+
+    # Keep full shard state in one dictionary for final atomic write, but avoid
+    # expanding all overlay records at once.
+    state_tiles: dict[tuple[int, int], tuple[np.ndarray, np.ndarray]] = {}
+    for ref in state_refs:
+        state_tiles[(ref.x, ref.y)] = load_sparse_record_from_root(state_root, ref, cfg)
+
+    chunk_target_bytes = max(1, int(getattr(cfg, "io_buffer_bytes", 32 * 1024 * 1024)))
+    overlay_chunks = _chunk_tile_refs(overlay_refs, chunk_target_bytes)
+    for chunk in overlay_chunks:
+        for ref in chunk:
+            key = (ref.x, ref.y)
+            new_pos, new_val = load_sparse_record_from_root(overlay_root, ref, cfg)
+            old_pos, old_val = state_tiles.get(key, (np.empty(0, dtype=np.uint32), np.empty(0, dtype=np.uint8)))
+            state_tiles[key] = merge_sparse_overlay(old_pos, old_val, new_pos, new_val)
+
     writer = AtomicSparseShardWriter(state_root, cfg, sx, sy, label="rolling-state")
     meta = writer.write(state_tiles)
     if meta is None:
