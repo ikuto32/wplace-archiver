@@ -1,0 +1,41 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
+# uv
+.uv-cache/
+
+# build
+dist/
+build/
+*.egg-info/
+
+# wplace generated data
+wplace_downloads/
+wplace_sparse_store/
+wplace_xyz/
+
+# large archives / generated stores
+*.tar.gz
+*.tar.gz.*
+*.tar.zst
+*.tar.zst.*
+*.tar.zstd
+*.tar.zstd.*
+*.bin
+*.tmp
+
+# diagnostics / reports
+probe_*.jsonl
+png_mode_report.json
+p_mode_transparency_report.json
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
