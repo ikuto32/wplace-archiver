@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tomllib
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
@@ -54,46 +55,19 @@ class Config:
     apply_max_tasks_per_child: int = 0
 
     @classmethod
-    def from_env(cls) -> "Config":
-        cpu = os.cpu_count() or 4
-        return cls(
-            repo=os.environ.get("WPLACE_REPO", "murolem/wplace-archives"),
-            download_dir=Path(os.environ.get("WPLACE_DOWNLOAD_DIR", "./wplace_downloads")),
-            store_root=Path(os.environ.get("WPLACE_STORE_ROOT", "./wplace_sparse_store")),
-            xyz_output_dir=Path(os.environ.get("WPLACE_XYZ_OUTPUT_DIR", "./wplace_xyz")),
-            interval_days=int(os.environ.get("WPLACE_INTERVAL_DAYS", "10")),
-            xyz_z=int(os.environ.get("WPLACE_XYZ_Z", "11")),
-            grid_tiles=int(os.environ.get("WPLACE_GRID_TILES", "2048")),
-            tile_size=int(os.environ.get("WPLACE_TILE_SIZE", "1000")),
-            shard_tiles=int(os.environ.get("WPLACE_SHARD_TILES", "32")),
-            max_colors=int(os.environ.get("WPLACE_MAX_COLORS", "64")),
-            max_concurrent_downloads=int(os.environ.get("WPLACE_MAX_DOWNLOADS", "4")),
-            workers=int(os.environ.get("WPLACE_WORKERS", str(cpu))),
-            prefetch_factor=int(os.environ.get("WPLACE_PREFETCH", "4")),
-            apply_workers=int(os.environ.get("WPLACE_APPLY_WORKERS", os.environ.get("WPLACE_WORKERS", str(cpu)))),
-            decode_workers=int(os.environ.get("WPLACE_DECODE_WORKERS", os.environ.get("WPLACE_WORKERS", str(cpu)))),
-            io_buffer_bytes=int(os.environ.get("WPLACE_IO_BUFFER_MB", "16")) * 1024 * 1024,
-            compression_backend=os.environ.get("WPLACE_COMPRESSION_BACKEND", "auto").strip().lower(),
-            store_compression=os.environ.get("WPLACE_STORE_COMPRESSION", "zstd").strip().lower(),
-            store_zstd_level=int(os.environ.get("WPLACE_STORE_ZSTD_LEVEL", "3")),
-            gzip_backend=os.environ.get("WPLACE_GZIP_BACKEND", "auto").strip().lower(),
-            pigz_path=os.environ.get("WPLACE_PIGZ_PATH", "pigz-2.3-bin-win32/pigz.exe" if os.name == "nt" else "pigz"),
-            pigz_threads=int(os.environ.get("WPLACE_PIGZ_THREADS", str(max(1, cpu)))),
-            use_isal_gzip=os.environ.get("WPLACE_USE_ISAL_GZIP", "1") == "1",
-            validate_download_digest=os.environ.get("WPLACE_VALIDATE_DOWNLOAD_DIGEST", "0") == "1",
-            keep_archives=os.environ.get("WPLACE_KEEP_ARCHIVES", "0") == "1",
-            keep_tag_stores=os.environ.get("WPLACE_KEEP_TAG_STORES", "0") == "1",
-            strict_rgba=os.environ.get("WPLACE_STRICT_RGBA", "0") == "1",
-            strict_binary_alpha=os.environ.get("WPLACE_STRICT_BINARY_ALPHA", "0") == "1",
-            rgb_transparency_mode=os.environ.get("WPLACE_RGB_TRANSPARENCY_MODE", "corners").strip().lower(),
-            rgb_transparent_colors=os.environ.get("WPLACE_RGB_TRANSPARENT_COLORS", ""),
-            rgb_transparent_dominant_min=float(os.environ.get("WPLACE_RGB_TRANSPARENT_DOMINANT_MIN", "0.90")),
-            black_warning_ratio=float(os.environ.get("WPLACE_BLACK_WARNING_RATIO", "0.70")),
-            fixed_palette_path=Path(os.environ["WPLACE_FIXED_PALETTE"]) if os.environ.get("WPLACE_FIXED_PALETTE") else None,
-            ingest_prescan=os.environ.get("WPLACE_INGEST_PRESCAN", "0") == "1",
-            apply_executor=os.environ.get("WPLACE_APPLY_EXECUTOR", "thread").strip().lower(),
-            apply_max_tasks_per_child=int(os.environ.get("WPLACE_APPLY_MAX_TASKS_PER_CHILD", "0")),
-        )
+    def from_toml(cls, path: Path | None = None) -> "Config":
+        if path is None or not path.exists():
+            return cls()
+        with path.open("rb") as f:
+            loaded = tomllib.load(f)
+        if not isinstance(loaded, dict):
+            raise ValueError(f"invalid config TOML: expected table root: {path}")
+
+        data = dict(loaded)
+        for key in ["download_dir", "store_root", "xyz_output_dir", "fixed_palette_path"]:
+            if data.get(key) is not None:
+                data[key] = Path(data[key])
+        return cls().with_overrides(**data)
 
     def with_overrides(self, **kwargs) -> "Config":
         cleaned = {k: v for k, v in kwargs.items() if v is not None}
@@ -137,7 +111,7 @@ class Config:
 
     @property
     def dense_fallback_bytes(self) -> int:
-        return int(os.environ.get("WPLACE_DENSE_FALLBACK_BYTES", str(self.tile_pixels)))
+        return self.tile_pixels
 
     def stable_dict(self) -> dict:
         data = asdict(self)

@@ -1,0 +1,42 @@
+repo = "murolem/wplace-archives"
+download_dir = "./wplace_downloads"
+store_root = "./wplace_sparse_store"
+xyz_output_dir = "./wplace_xyz"
+
+interval_days = 10
+xyz_z = 11
+grid_tiles = 2048
+tile_size = 1000
+shard_tiles = 32
+max_colors = 64
+
+max_concurrent_downloads = 4
+workers = 4
+prefetch_factor = 4
+apply_workers = 4
+decode_workers = 4
+io_buffer_bytes = 16777216
+
+compression_backend = "auto"
+store_compression = "zstd"
+store_zstd_level = 3
+gzip_backend = "auto"
+pigz_path = "pigz"
+pigz_threads = 4
+use_isal_gzip = true
+
+validate_download_digest = false
+keep_archives = false
+keep_tag_stores = false
+strict_rgba = false
+strict_binary_alpha = false
+
+rgb_transparency_mode = "corners"
+rgb_transparent_colors = ""
+rgb_transparent_dominant_min = 0.9
+black_warning_ratio = 0.7
+
+ingest_prescan = false
+
+apply_executor = "thread"
+apply_max_tasks_per_child = 0

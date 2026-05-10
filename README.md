@@ -72,22 +72,23 @@ uv run wplace_archiver.py diagnose-rgb-transparency `
   --out wplace_sparse_store/diagnostics/rgb_transparency_samples
 ```
 
-## Environment
+## Configuration (TOML)
 
-Common environment variables:
+Create `wplace_archiver.toml` and edit values there.
+The CLI loads this file by default, or use `--config <path>`.
 
-```text
-WPLACE_REPO=murolem/wplace-archives
-WPLACE_DOWNLOAD_DIR=./wplace_downloads
-WPLACE_STORE_ROOT=./wplace_sparse_store
-WPLACE_XYZ_OUTPUT_DIR=./wplace_xyz
-WPLACE_COMPRESSION_BACKEND=auto # auto | zstd | gzip
-WPLACE_GZIP_BACKEND=auto       # gzip compatibility only: auto | pigz | isal | python
-WPLACE_KEEP_TAG_STORES=0
-WPLACE_KEEP_ARCHIVES=0
-WPLACE_RGB_TRANSPARENCY_MODE=corners
-WPLACE_RGB_TRANSPARENT_DOMINANT_MIN=0.90
-WPLACE_VALIDATE_DOWNLOAD_DIGEST=0
+```toml
+repo = "murolem/wplace-archives"
+download_dir = "./wplace_downloads"
+store_root = "./wplace_sparse_store"
+xyz_output_dir = "./wplace_xyz"
+compression_backend = "auto" # auto | zstd | gzip
+gzip_backend = "auto"         # auto | pigz | isal | python
+keep_tag_stores = false
+keep_archives = false
+rgb_transparency_mode = "corners"
+rgb_transparent_dominant_min = 0.90
+validate_download_digest = false
 ```
 
 ## Checkpointing
@@ -120,9 +121,9 @@ New split archives should use Zstandard: `*.tar.zst.*` or `*.tar.zstd.*`. Existi
 
 New intermediate shard records are compressed with Zstandard by default:
 
-```text
-WPLACE_STORE_COMPRESSION=zstd  # zstd | none
-WPLACE_STORE_ZSTD_LEVEL=3
+```toml
+store_compression = "zstd"  # zstd | none
+store_zstd_level = 3
 ```
 
 Compression is recorded per tile record in each shard index using `compression` and `uncompressed_size` fields. Older stores that do not have these fields are treated as `compression="none"` and remain readable.
@@ -142,24 +143,25 @@ failures on Windows when native zstd/NumPy code is involved.
 Recommended stable run:
 
 ```powershell
-$env:WPLACE_APPLY_EXECUTOR="thread"
-$env:WPLACE_APPLY_WORKERS="4"
-uv run wplace_archiver.py run --no-export
+uv run wplace_archiver.py --config wplace_archiver.toml run --no-export
+# example settings in TOML:
+# apply_executor = "thread"
+# apply_workers = 4
 ```
 
 If you need process-based execution, limit worker lifetime:
 
 ```powershell
-$env:WPLACE_APPLY_EXECUTOR="process"
-$env:WPLACE_APPLY_MAX_TASKS_PER_CHILD="1"
 uv run wplace_archiver.py run --no-export
+# apply_executor = "process"
+# apply_max_tasks_per_child = 1
 ```
 
 For maximum isolation:
 
 ```powershell
-$env:WPLACE_APPLY_EXECUTOR="isolated-process"
 uv run wplace_archiver.py run --no-export
+# apply_executor = "isolated-process"
 ```
 
 Apply progress is checkpointed per shard under:
