@@ -53,18 +53,27 @@ def _make_tar_bytes(files: dict[str, bytes]) -> bytes:
     return raw_tar.getvalue()
 
 
-def _write_split_tar_gz(tag_dir: Path, tag: str, files: dict[str, bytes], split_at: int | None = None) -> list[Path]:
-    tag_dir.mkdir(parents=True, exist_ok=True)
-    gz = gzip.compress(_make_tar_bytes(files))
+def _split_bytes(payload: bytes, split_at: int | None = None) -> tuple[bytes, bytes]:
     if split_at is None:
-        split_at = max(1, len(gz) // 2)
-    parts = [gz[:split_at], gz[split_at:]]
-    paths = []
+        split_at = max(1, len(payload) // 2)
+    return payload[:split_at], payload[split_at:]
+
+
+def _write_split_tar_parts(tag_dir: Path, tag: str, ext: str, payload: bytes, split_at: int | None = None) -> list[Path]:
+    first, second = _split_bytes(payload, split_at=split_at)
+    parts = [first, second]
+    paths: list[Path] = []
     for suffix, data in zip(["aa", "ab"], parts):
-        path = tag_dir / f"{tag}.tar.gz.{suffix}"
+        path = tag_dir / f"{tag}.{ext}.{suffix}"
         path.write_bytes(data)
         paths.append(path)
     return paths
+
+
+def _write_split_tar_gz(tag_dir: Path, tag: str, files: dict[str, bytes], split_at: int | None = None) -> list[Path]:
+    tag_dir.mkdir(parents=True, exist_ok=True)
+    gz = gzip.compress(_make_tar_bytes(files))
+    return _write_split_tar_parts(tag_dir, tag, "tar.gz", gz, split_at=split_at)
 
 
 def _write_split_tar_zst(tag_dir: Path, tag: str, files: dict[str, bytes], split_at: int | None = None) -> list[Path] | None:
@@ -73,15 +82,7 @@ def _write_split_tar_zst(tag_dir: Path, tag: str, files: dict[str, bytes], split
         return None
     tag_dir.mkdir(parents=True, exist_ok=True)
     zst = _zstd_compress(_make_tar_bytes(files), level=3)
-    if split_at is None:
-        split_at = max(1, len(zst) // 2)
-    parts = [zst[:split_at], zst[split_at:]]
-    paths = []
-    for suffix, data in zip(["aa", "ab"], parts):
-        path = tag_dir / f"{tag}.tar.zst.{suffix}"
-        path.write_bytes(data)
-        paths.append(path)
-    return paths
+    return _write_split_tar_parts(tag_dir, tag, "tar.zst", zst, split_at=split_at)
 
 
 def _read_exported_pixel(path: Path, xy: tuple[int, int]) -> tuple[int, int, int, int]:
