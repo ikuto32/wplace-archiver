@@ -16,9 +16,9 @@ from .utils import atomic_write_json, parse_tile_path
 
 
 def _decode_to_payload(x: int, y: int, png_bytes: bytes, cfg: Config, palette: PaletteCodec):
-    arr = decode_png_array(png_bytes, cfg)
+    arr, decode_meta = decode_png_array(png_bytes, cfg, include_meta=True)
     payload, count, encoding, diag = palette.image_to_record(arr)
-    return x, y, payload, count, encoding, diag
+    return x, y, payload, count, encoding, diag, decode_meta
 
 
 def count_png_members(part_files: list[Path], cfg: Config) -> int:
@@ -45,6 +45,9 @@ def ingest_tag_from_parts(tag: str, part_files: list[Path], cfg: Config, palette
     diagnostics_limit = 250
     rgb_tiles_seen = 0
     rgba_warning_tiles = 0
+    p_tiles_seen = 0
+    p_has_trns = 0
+    p_no_trns = 0
     errors: list[str] = []
     png_seen = 0
     records_written = 0
@@ -55,14 +58,20 @@ def ingest_tag_from_parts(tag: str, part_files: list[Path], cfg: Config, palette
         pending = set()
 
         def drain(done_set):
-            nonlocal records_written, visible_pixels, rgb_tiles_seen, rgba_warning_tiles
+            nonlocal records_written, visible_pixels, rgb_tiles_seen, rgba_warning_tiles, p_tiles_seen, p_has_trns, p_no_trns
             for fut in done_set:
                 try:
-                    x, y, payload, count, encoding, diag = fut.result()
+                    x, y, payload, count, encoding, diag, decode_meta = fut.result()
                     if count:
                         writer.write_tile_payload(x, y, payload, count, encoding)
                         records_written += 1
                         visible_pixels += int(count)
+                    if decode_meta.get("source_mode") == "P":
+                        p_tiles_seen += 1
+                        if decode_meta.get("p_has_trns"):
+                            p_has_trns += 1
+                        else:
+                            p_no_trns += 1
                     if diag.get("input") == "rgb":
                         rgb_tiles_seen += 1
                         if len(rgb_diagnostics_sample) < diagnostics_limit:
@@ -106,6 +115,9 @@ def ingest_tag_from_parts(tag: str, part_files: list[Path], cfg: Config, palette
         "records_written": records_written,
         "visible_pixels": visible_pixels,
         "rgb_tiles_seen": rgb_tiles_seen,
+        "p_tiles_seen": p_tiles_seen,
+        "p_has_trns": p_has_trns,
+        "p_no_trns": p_no_trns,
         "rgba_black_warning_tiles": rgba_warning_tiles,
         "rgb_black_dominant_tiles_in_sample": rgb_black_dominant_tiles,
         "rgb_transparency_diagnostics_sample": rgb_diagnostics_sample,
