@@ -93,6 +93,22 @@ def _shard_meta_from_index(root: Path, cfg: Config, sx: int, sy: int) -> dict | 
     }
 
 
+def _shard_weight_from_index(root: Path, cfg: Config, sx: int, sy: int) -> int:
+    idx_path = shard_index_path(root, sx, sy)
+    if not idx_path.exists():
+        return 0
+    idx = load_json(idx_path, None)
+    if idx is None:
+        return 0
+    stored_bytes = idx.get("stored_bytes")
+    if stored_bytes is not None:
+        return int(stored_bytes)
+    tile_count = idx.get("tile_count")
+    if tile_count is not None:
+        return int(tile_count)
+    return 0
+
+
 def load_shard_tiles_as_dict(root: Path, cfg: Config, sx: int, sy: int) -> dict[tuple[int, int], tuple[np.ndarray, np.ndarray]]:
     idx_path = shard_index_path(root, sx, sy)
     if not idx_path.exists():
@@ -297,6 +313,12 @@ def apply_tag_store_to_state(tag: str, cfg: Config) -> dict:
             # checkpoint is stale; redo shard
             completed.discard(sname)
         tasks.append((cfg.state_root, overlay_root, cfg, sx, sy))
+
+    shard_weights = {
+        shard_name(sx, sy): _shard_weight_from_index(overlay_root, cfg, sx, sy)
+        for sx, sy in overlay_shards
+    }
+    tasks.sort(key=lambda t: shard_weights.get(shard_name(t[3], t[4]), 0), reverse=True)
 
     checkpoint["completed_shards"] = sorted(completed)
     _save_apply_checkpoint(cfg, tag, checkpoint)
