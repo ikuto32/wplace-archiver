@@ -1,22 +1,8 @@
 from __future__ import annotations
 
 import io
-from types import ModuleType
-
+from .compression import get_zstd_module
 from .config import Config
-
-
-def get_zstd_module() -> ModuleType | None:
-    """Return Python 3.14 stdlib compression.zstd, or backports.zstd."""
-    try:
-        from compression import zstd  # type: ignore
-        return zstd
-    except Exception:
-        try:
-            import backports.zstd as zstd  # type: ignore
-            return zstd
-        except Exception:
-            return None
 
 
 def zstd_available() -> bool:

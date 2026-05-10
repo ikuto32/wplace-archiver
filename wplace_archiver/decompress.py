@@ -7,30 +7,16 @@ import subprocess
 import tarfile
 import threading
 from pathlib import Path
-from types import ModuleType
-
 try:
     import isal.igzip as igzip  # type: ignore
 except Exception:  # pragma: no cover
     igzip = None
 
+from .compression import get_zstd_module
 from .config import Config
 from .errors import DecompressError
 from .split_assets import validate_local_part_names
 from .utils import asset_compression
-
-
-def get_zstd_module() -> ModuleType | None:
-    """Return Python 3.14 stdlib compression.zstd, or backports.zstd on older Pythons."""
-    try:
-        from compression import zstd  # type: ignore
-        return zstd
-    except Exception:
-        try:
-            import backports.zstd as zstd  # type: ignore
-            return zstd
-        except Exception:
-            return None
 
 
 class ConcatReader(io.RawIOBase):
