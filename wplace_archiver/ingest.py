@@ -17,6 +17,8 @@ from .utils import atomic_write_json, parse_tile_path
 
 def _decode_to_payload(x: int, y: int, png_bytes: bytes, cfg: Config, palette: PaletteCodec):
     arr, decode_meta = decode_png_array(png_bytes, cfg, include_meta=True)
+    # Decode stays fully parallel, but palette mutation is serialized internally
+    # by PaletteCodec when unknown colors are discovered/mapped.
     payload, count, encoding, diag = palette.image_to_record(arr)
     return x, y, payload, count, encoding, diag, decode_meta
 

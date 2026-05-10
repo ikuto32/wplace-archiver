@@ -157,12 +157,12 @@ class PaletteCodec:
 
     def _map_rgb24_to_index(self, rgb24: np.ndarray) -> np.ndarray:
         rgb24 = rgb24.astype(np.uint32, copy=False)
-        mapped = self._lut[rgb24]
-        if np.any(mapped == 0):
-            unknown = np.unique(rgb24[mapped == 0])
-            with self._lock:
-                self._add_unknown_colors_locked(unknown)
+        with self._lock:
             mapped = self._lut[rgb24]
+            if np.any(mapped == 0):
+                unknown = np.unique(rgb24[mapped == 0])
+                self._add_unknown_colors_locked(unknown)
+                mapped = self._lut[rgb24]
         if np.any(mapped == 0):
             raise PaletteError("visible pixels remained unmapped after palette update")
         return mapped.astype(np.uint8, copy=False)
