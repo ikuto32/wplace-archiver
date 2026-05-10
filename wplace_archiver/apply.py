@@ -201,18 +201,28 @@ def _run_isolated_worker_cli(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _resolve_progress_mode(tasks) -> tuple[int | float, bool]:
+    weights = [t[5] for t in tasks]
+    if any(w is None for w in weights):
+        return len(tasks), False
+    return sum(float(w) for w in weights), True
+
+
 def _apply_tasks_sequential(tag: str, cfg: Config, tasks, checkpoint, shard_metas, stats):
-    with tqdm(total=len(tasks), desc=f"apply {tag}", unit="shard") as pbar:
+    total, weighted = _resolve_progress_mode(tasks)
+    with tqdm(total=total, desc=f"apply {tag}", unit="shard") as pbar:
         for t in tasks:
-            _state_root, _overlay_root, _cfg, sx, sy = t
+            _state_root, _overlay_root, _cfg, sx, sy, shard_weight = t
             sname = shard_name(sx, sy)
             try:
-                meta = _apply_worker(t)
+                meta = _apply_worker((_state_root, _overlay_root, _cfg, sx, sy))
                 if meta:
                     shard_metas[meta["name"]] = meta
                 _mark_checkpoint_completed(cfg, tag, checkpoint, sname)
                 stats["applied_shards"] += 1
-                pbar.update(1)
+                delta = float(shard_weight) if weighted else 1
+                pbar.update(delta)
+                pbar.set_postfix(shard=sname, weight=delta)
             except Exception as exc:
                 _mark_checkpoint_failed(cfg, tag, checkpoint, sname, "apply_shard", exc)
                 raise
@@ -222,9 +232,10 @@ def _apply_tasks_isolated(tag: str, cfg: Config, tasks, checkpoint, shard_metas,
     cfg_path = _apply_checkpoint_path(cfg, tag).with_suffix(".config.json")
     atomic_write_json(cfg_path, _cfg_to_jsonable(cfg))
     try:
-        with tqdm(total=len(tasks), desc=f"apply {tag}", unit="shard") as pbar:
+        total, weighted = _resolve_progress_mode(tasks)
+        with tqdm(total=total, desc=f"apply {tag}", unit="shard") as pbar:
             for t in tasks:
-                state_root, overlay_root, _cfg, sx, sy = t
+                state_root, overlay_root, _cfg, sx, sy, shard_weight = t
                 sname = shard_name(sx, sy)
                 try:
                     meta = _isolated_apply_worker(cfg_path, state_root, overlay_root, sx, sy)
@@ -232,7 +243,9 @@ def _apply_tasks_isolated(tag: str, cfg: Config, tasks, checkpoint, shard_metas,
                         shard_metas[meta["name"]] = meta
                     _mark_checkpoint_completed(cfg, tag, checkpoint, sname)
                     stats["applied_shards"] += 1
-                    pbar.update(1)
+                    delta = float(shard_weight) if weighted else 1
+                    pbar.update(delta)
+                    pbar.set_postfix(shard=sname, weight=delta)
                 except Exception as exc:
                     _mark_checkpoint_failed(cfg, tag, checkpoint, sname, "isolated_apply_shard", exc)
                     raise
@@ -246,22 +259,25 @@ def _apply_tasks_executor(tag: str, cfg: Config, tasks, checkpoint, shard_metas,
     if cfg.apply_executor == "process" and cfg.apply_max_tasks_per_child and cfg.apply_max_tasks_per_child > 0:
         kwargs["max_tasks_per_child"] = int(cfg.apply_max_tasks_per_child)
 
-    with Executor(**kwargs) as ex, tqdm(total=len(tasks), desc=f"apply {tag}", unit="shard") as pbar:
+    total, weighted = _resolve_progress_mode(tasks)
+    with Executor(**kwargs) as ex, tqdm(total=total, desc=f"apply {tag}", unit="shard") as pbar:
         future_to_shard = {}
         for t in tasks:
-            _state_root, _overlay_root, _cfg, sx, sy = t
-            fut = ex.submit(_apply_worker, t)
-            future_to_shard[fut] = (sx, sy, shard_name(sx, sy))
+            _state_root, _overlay_root, _cfg, sx, sy, shard_weight = t
+            fut = ex.submit(_apply_worker, (_state_root, _overlay_root, _cfg, sx, sy))
+            future_to_shard[fut] = (sx, sy, shard_name(sx, sy), shard_weight)
 
         for fut in as_completed(future_to_shard):
-            sx, sy, sname = future_to_shard[fut]
+            sx, sy, sname, shard_weight = future_to_shard[fut]
             try:
                 meta = fut.result()
                 if meta:
                     shard_metas[meta["name"]] = meta
                 _mark_checkpoint_completed(cfg, tag, checkpoint, sname)
                 stats["applied_shards"] += 1
-                pbar.update(1)
+                delta = float(shard_weight) if weighted else 1
+                pbar.update(delta)
+                pbar.set_postfix(shard=sname, weight=delta)
             except Exception as exc:
                 _mark_checkpoint_failed(cfg, tag, checkpoint, sname, f"{cfg.apply_executor}_apply_shard", exc)
                 raise
@@ -296,7 +312,11 @@ def apply_tag_store_to_state(tag: str, cfg: Config) -> dict:
                 continue
             # checkpoint is stale; redo shard
             completed.discard(sname)
-        tasks.append((cfg.state_root, overlay_root, cfg, sx, sy))
+        overlay_meta = _shard_meta_from_index(overlay_root, cfg, sx, sy)
+        shard_weight = None
+        if overlay_meta is not None:
+            shard_weight = overlay_meta.get("visible_pixels") or overlay_meta.get("tile_count")
+        tasks.append((cfg.state_root, overlay_root, cfg, sx, sy, shard_weight))
 
     checkpoint["completed_shards"] = sorted(completed)
     _save_apply_checkpoint(cfg, tag, checkpoint)
