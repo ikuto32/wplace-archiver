@@ -18,6 +18,7 @@ from .validation import validate_store
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="wplace Archiver v2 rolling sparse pipeline")
+    p.add_argument("--config", type=Path, default=Path("wplace_archiver.toml"), help="TOML config path")
     p.add_argument("--store-root", type=Path)
     p.add_argument("--download-dir", type=Path)
     p.add_argument("--xyz-output-dir", type=Path)
@@ -63,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def cfg_from_args(args) -> Config:
-    cfg = Config.from_env()
+    cfg = Config.from_toml(args.config)
     overrides = {
         "store_root": args.store_root,
         "download_dir": args.download_dir,
