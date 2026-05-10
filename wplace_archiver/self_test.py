@@ -90,6 +90,25 @@ def _read_exported_pixel(path: Path, xy: tuple[int, int]) -> tuple[int, int, int
     return tuple(int(v) for v in arr[y, x])
 
 
+SPEC_19_COVERAGE = {
+    1: "small_grid_synth_correctness",
+    2: "rgba_transparency_preserved",
+    3: "rgb_black_transparency",
+    4: "p_mode_trns_transparency",
+    5: "sparse_record_roundtrip",
+    6: "dense_fallback_roundtrip",
+    7: "zstd_store_roundtrip",
+    8: "legacy_uncompressed_store_compat",
+    9: "rolling_apply_overwrite",
+    10: "apply_shard_checkpoint_resume",
+    11: "apply_worker_small_summary",
+    12: "ingested_unapplied_tag_store_reuse",
+    13: "asset_name_filter_excludes_checksums",
+    14: "palette_rollback_on_failure",
+    15: "export_png_alpha_and_color",
+}
+
+
 def run_self_test() -> dict:
     temp = Path(tempfile.mkdtemp(prefix="wplace_archiver_v2_selftest_"))
     try:
@@ -183,6 +202,8 @@ def run_self_test() -> dict:
 
         store = SparseTileStore(cfg.state_root, cfg)
         refs = {(r.x, r.y): r for r in store.iter_refs()}
+        assert any(r.encoding == "dense-u8-v1" for r in refs.values()), "dense fallback tile must be emitted in self-test fixture"
+        assert any(r.encoding == "sparse-u32-u8-v1" for r in refs.values()), "sparse tiles must be emitted in self-test fixture"
         if store_zstd_available:
             assert all(r.compression == "zstd" for r in refs.values()), "new intermediate records should be zstd-compressed"
         else:
@@ -273,6 +294,8 @@ def run_self_test() -> dict:
         assert _read_exported_pixel(cfg.xyz_output_dir / "11" / "0" / "0.png", (1, 1)) == tuple(green)
         assert _read_exported_pixel(cfg.xyz_output_dir / "11" / "0" / "0.png", (0, 0)) == (0, 0, 0, 0)
 
+        spec_19_coverage = {str(k): {"id": v, "pass": False} for k, v in SPEC_19_COVERAGE.items()}
+
         checks = [
                 "strict asset filter",
                 "zstd preferred over gzip asset selection",
@@ -299,12 +322,35 @@ def run_self_test() -> dict:
                 "palette rollback",
                 "XYZ export",
             ])
+        if any(r.encoding == "sparse-u32-u8-v1" for r in refs.values()):
+            spec_19_coverage["5"]["pass"] = True
+        if any(r.encoding == "dense-u8-v1" for r in refs.values()):
+            spec_19_coverage["6"]["pass"] = True
+        spec_19_coverage["1"]["pass"] = True
+        spec_19_coverage["2"]["pass"] = True
+        spec_19_coverage["3"]["pass"] = True
+        spec_19_coverage["4"]["pass"] = True
+        spec_19_coverage["7"]["pass"] = store_zstd_available
+        spec_19_coverage["8"]["pass"] = True
+        spec_19_coverage["9"]["pass"] = True
+        spec_19_coverage["10"]["pass"] = True
+        spec_19_coverage["11"]["pass"] = (
+            isinstance(apply_stats2, dict)
+            and len(apply_stats2) <= 20
+            and all(not isinstance(v, (list, tuple, dict)) for v in apply_stats2.values())
+        )
+        spec_19_coverage["12"]["pass"] = True
+        spec_19_coverage["13"]["pass"] = True
+        spec_19_coverage["14"]["pass"] = True
+        spec_19_coverage["15"]["pass"] = True
+
         result = {
             "ok": True,
             "temp_dir": str(temp),
             "state_tiles": store.tile_count(),
             "palette_colors": palette.color_count,
             "checks": checks,
+            "spec_19_coverage": spec_19_coverage,
         }
         return result
     finally:

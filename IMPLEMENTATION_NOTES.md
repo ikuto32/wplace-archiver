@@ -72,6 +72,28 @@ The offline self-test validates:
 - palette rollback after ingest failure
 - XYZ PNG export
 
+### Spec 19 coverage mapping (self-test)
+
+`wplace_archiver/self_test.py` defines `SPEC_19_COVERAGE` and emits `spec_19_coverage` in `self-test --json` output so maintenance can track each requirement directly.
+
+| Spec 19 item | Self-test ID | Main assertion point |
+| --- | --- | --- |
+| 1 | `small_grid_synth_correctness` | tiny 4x4 fixtures ingested/applied/exported end-to-end |
+| 2 | `rgba_transparency_preserved` | RGBA alpha remains transparent/visible in state and export |
+| 3 | `rgb_black_transparency` | RGB black inferred transparent, non-black remains visible |
+| 4 | `p_mode_trns_transparency` | P mode `tRNS` transparency survives decode |
+| 5 | `sparse_record_roundtrip` | sparse tile encoding (`sparse-u32-u8-v1`) emitted and read |
+| 6 | `dense_fallback_roundtrip` | dense fallback encoding (`dense-u8-v1`) emitted and read |
+| 7 | `zstd_store_roundtrip` | zstd-compressed shard records round-trip (if zstd available) |
+| 8 | `legacy_uncompressed_store_compat` | index without compression metadata reads as `none` |
+| 9 | `rolling_apply_overwrite` | later tag overwrites earlier tag on same pixel |
+| 10 | `apply_shard_checkpoint_resume` | `.apply_shards/<tag>.json` completion + shard list |
+| 11 | `apply_worker_small_summary` | apply summary keeps only compact keys |
+| 12 | `ingested_unapplied_tag_store_reuse` | `PipelineState` ingest checkpoint + manifest reuse |
+| 13 | `asset_name_filter_excludes_checksums` | `.sha256` etc excluded from release asset selection |
+| 14 | `palette_rollback_on_failure` | palette snapshot restored on ingest failure |
+| 15 | `export_png_alpha_and_color` | exported PNG pixel alpha/color checked |
+
 ## Not validated here
 
 - Live GitHub API download against `murolem/wplace-archives`

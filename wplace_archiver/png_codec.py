@@ -19,7 +19,7 @@ from .config import Config
 from .errors import PngDecodeError
 
 
-def decode_png_array(png_bytes: bytes, cfg: Config) -> np.ndarray:
+def decode_png_array(png_bytes: bytes, cfg: Config, *, include_meta: bool = False) -> np.ndarray | tuple[np.ndarray, dict[str, object]]:
     """Decode PNG into uint8 RGB or RGBA.
 
     Indexed-color PNGs (P mode) must go through Pillow so that PNG tRNS
@@ -31,6 +31,9 @@ def decode_png_array(png_bytes: bytes, cfg: Config) -> np.ndarray:
     try:
         im = Image.open(io.BytesIO(png_bytes))
         mode = im.mode
+        meta: dict[str, object] = {"source_mode": mode, "p_has_trns": False}
+        if mode == "P":
+            meta["p_has_trns"] = bool(im.info.get("transparency") is not None)
 
         if cfg.strict_rgba and mode != "RGBA":
             raise PngDecodeError(f"expected RGBA PNG, got mode={mode}")
@@ -39,22 +42,26 @@ def decode_png_array(png_bytes: bytes, cfg: Config) -> np.ndarray:
         # Do not pass these through pyspng, because a decoder returning RGB here
         # would silently discard PNG transparency metadata.
         if mode == "P":
-            return np.asarray(im.convert("RGBA"), dtype=np.uint8)
+            arr = np.asarray(im.convert("RGBA"), dtype=np.uint8)
+            return (arr, meta) if include_meta else arr
 
         # Preserve actual RGB inputs as RGB. Black-background handling is applied
         # only to this source mode in PaletteCodec.
         if mode == "RGB":
-            return np.asarray(im, dtype=np.uint8)
+            arr = np.asarray(im, dtype=np.uint8)
+            return (arr, meta) if include_meta else arr
 
         # For true RGBA PNGs, use the fast path when available.
         if mode == "RGBA" and pyspng is not None:
             arr = pyspng.load(png_bytes)
             if arr.ndim == 3 and arr.shape[-1] == 4:
-                return np.ascontiguousarray(arr)
+                out = np.ascontiguousarray(arr)
+                return (out, meta) if include_meta else out
 
         # Grayscale, LA, and other modes are normalized to RGBA so their alpha,
         # if present, is represented explicitly.
-        return np.asarray(im.convert("RGBA"), dtype=np.uint8)
+        arr = np.asarray(im.convert("RGBA"), dtype=np.uint8)
+        return (arr, meta) if include_meta else arr
     except PngDecodeError:
         raise
     except Exception as exc:
