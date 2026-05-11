@@ -13,6 +13,8 @@
     python extract_artworks.py --dilate 3 --min-pixels 16
 """
 import argparse
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -124,6 +126,12 @@ def process_tile(tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size):
     return saved
 
 
+def process_tile_worker(task):
+    """ProcessPoolExecutor向け: シリアライズしやすい引数を受け取る。"""
+    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size = task
+    return process_tile(Path(tiles_dir_s), x, y, dilate, min_pixels, Path(out_dir_s), tile_size)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--tiles", default="tiles", help="downloaded tiles directory")
@@ -133,6 +141,8 @@ def main():
     p.add_argument("--min-pixels", type=int, default=16,
                    help="minimum painted pixels to count as an artwork (filters noise)")
     p.add_argument("--tile-size", type=int, default=1000, help="tile pixel size (default 1000)")
+    p.add_argument("--workers", type=int, default=os.cpu_count(),
+                   help="number of worker processes (default: os.cpu_count(), 1 = serial)")
     args = p.parse_args()
 
     tiles_dir = Path(args.tiles)
@@ -145,16 +155,40 @@ def main():
         print("No tiles found. Run download_tiles.py first.")
         return
 
-    total = 0
-    for i, tf in enumerate(tile_files, 1):
+    tasks = []
+    for tf in tile_files:
         try:
             x = int(tf.parent.name)
             y = int(tf.stem)
         except ValueError:
             continue
-        total += process_tile(tiles_dir, x, y, args.dilate, args.min_pixels, out_dir, args.tile_size)
-        if i % 200 == 0:
-            print(f"[{i}/{len(tile_files)}] artworks saved so far: {total}")
+        tasks.append((str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size))
+
+    total = 0
+    if args.workers == 1:
+        for i, task in enumerate(tasks, 1):
+            _, x, y, *_ = task
+            try:
+                total += process_tile_worker(task)
+            except Exception as e:
+                print(f"[ERROR] tile ({x}, {y}) failed: {e}")
+            if i % 200 == 0:
+                print(f"[{i}/{len(tasks)}] artworks saved so far: {total}")
+    else:
+        workers = max(1, args.workers or 1)
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {
+                executor.submit(process_tile_worker, task): (task[1], task[2])
+                for task in tasks
+            }
+            for i, fut in enumerate(as_completed(futures), 1):
+                x, y = futures[fut]
+                try:
+                    total += fut.result()
+                except Exception as e:
+                    print(f"[ERROR] tile ({x}, {y}) failed: {e}")
+                if i % 200 == 0:
+                    print(f"[{i}/{len(tasks)}] artworks saved so far: {total}")
 
     print(f"\nDone. Saved {total} artworks to {out_dir}/")
 
