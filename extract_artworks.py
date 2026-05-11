@@ -26,6 +26,17 @@ from PIL import Image
 from scipy import ndimage
 
 
+STRUCT_CACHE: dict[int, np.ndarray] = {}
+
+
+def get_struct(dilate):
+    struct = STRUCT_CACHE.get(dilate)
+    if struct is None:
+        struct = np.ones((dilate * 2 + 1, dilate * 2 + 1), dtype=bool)
+        STRUCT_CACHE[dilate] = struct
+    return struct
+
+
 @dataclass
 class TileResult:
     x: int = 0
@@ -146,7 +157,7 @@ def process_tile(
     # 近接ピクセルを束ねる
     t0 = perf_counter()
     if dilate > 0:
-        struct = np.ones((dilate * 2 + 1, dilate * 2 + 1), dtype=bool)
+        struct = get_struct(dilate)
         merged = ndimage.binary_dilation(big_mask, structure=struct)
     else:
         merged = big_mask
