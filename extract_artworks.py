@@ -401,9 +401,25 @@ def main():
             done, _ = wait(inflight_saves, return_when=FIRST_COMPLETED)
             for fut in done:
                 inflight_saves.remove(fut)
-                total_save_ms += fut.result()
+                try:
+                    total_save_ms += fut.result()
+                except Exception as e:
+                    total.errors += 1
+                    print(f"[ERROR] async save failed: {e}")
             if not block_until_room:
                 break
+
+    def accumulate_tile_result(tile_result):
+        total.saved += tile_result.saved
+        total.skipped_existing += tile_result.skipped_existing
+        total.skipped_small += tile_result.skipped_small
+        total.skipped_center += tile_result.skipped_center
+        total.skipped_empty += tile_result.skipped_empty
+        total.errors += tile_result.errors
+        total.elapsed_ms += tile_result.elapsed_ms
+        total.components_total += tile_result.components_total
+        total.components_saved += tile_result.components_saved
+        total.pixels_painted += tile_result.pixels_painted
 
     if args.workers == 1:
         for i, task in enumerate(tasks, 1):
@@ -432,16 +448,7 @@ def main():
                         available_tiles=task[9],
                     )
                 
-                total.saved += tile_result.saved
-                total.skipped_existing += tile_result.skipped_existing
-                total.skipped_small += tile_result.skipped_small
-                total.skipped_center += tile_result.skipped_center
-                total.skipped_empty += tile_result.skipped_empty
-                total.errors += tile_result.errors
-                total.elapsed_ms += tile_result.elapsed_ms
-                total.components_total += tile_result.components_total
-                total.components_saved += tile_result.components_saved
-                total.pixels_painted += tile_result.pixels_painted
+                accumulate_tile_result(tile_result)
                 append_runlog(tile_result)
                 slow_tiles.append(tile_result)
             except Exception as e:
@@ -461,16 +468,7 @@ def main():
                 x, y = futures[fut]
                 try:
                     tile_result = fut.result()
-                    total.saved += tile_result.saved
-                    total.skipped_existing += tile_result.skipped_existing
-                    total.skipped_small += tile_result.skipped_small
-                    total.skipped_center += tile_result.skipped_center
-                    total.skipped_empty += tile_result.skipped_empty
-                    total.errors += tile_result.errors
-                    total.elapsed_ms += tile_result.elapsed_ms
-                    total.components_total += tile_result.components_total
-                    total.components_saved += tile_result.components_saved
-                    total.pixels_painted += tile_result.pixels_painted
+                    accumulate_tile_result(tile_result)
                     append_runlog(tile_result)
                     slow_tiles.append(tile_result)
                     if tile_result.errors > 0:
