@@ -15,7 +15,7 @@
 import argparse
 import json
 import os
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -41,6 +41,7 @@ class TileResult:
     components_saved: int = 0
     pixels_painted: int = 0
     phase_ms: dict = field(default_factory=dict)
+    save_queue_depth: int = 0
 
 
 def _load_tile_impl(path):
@@ -102,6 +103,7 @@ def build_mosaic(tiles_dir, x, y, tile_size, tile_cache, use_shared_cache=False)
 def process_tile(
     tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size,
     use_cache=True, use_shared_cache=False, skip_existing=False,
+    collect_outputs=False,
 ):
     start = perf_counter()
     t_load = 0.0
@@ -161,6 +163,7 @@ def process_tile(
 
     cy0, cx0 = tile_size, tile_size
     cy1, cx1 = tile_size * 2, tile_size * 2
+    pending_outputs = []
     # 各成分ごとに処理
     for label_id in range(1, n + 1):
         comp = labeled == label_id
@@ -198,9 +201,12 @@ def process_tile(
         if skip_existing and out_path.exists():
             result.skipped_existing += 1
             continue
-        t1 = perf_counter()
-        Image.fromarray(crop, "RGBA").save(out_path)
-        t_save += perf_counter() - t1
+        if collect_outputs:
+            pending_outputs.append((out_path, crop))
+        else:
+            t1 = perf_counter()
+            Image.fromarray(crop, "RGBA").save(out_path)
+            t_save += perf_counter() - t1
         result.saved += 1
         result.components_saved += 1
         result.pixels_painted += pixels
@@ -212,7 +218,15 @@ def process_tile(
         "save": int(t_save * 1000),
         "total": result.elapsed_ms,
     }
+    if collect_outputs:
+        return result, pending_outputs
     return result
+
+
+def save_artwork(out_path, crop):
+    t0 = perf_counter()
+    Image.fromarray(crop, "RGBA").save(out_path)
+    return int((perf_counter() - t0) * 1000)
 
 
 def process_tile_worker(task):
@@ -240,6 +254,10 @@ def main():
     p.add_argument("--tile-size", type=int, default=1000, help="tile pixel size (default 1000)")
     p.add_argument("--workers", type=int, default=os.cpu_count(),
                    help="number of worker processes (default: os.cpu_count(), 1 = serial)")
+    p.add_argument("--save-workers", type=int, default=1,
+                   help="number of save worker threads (0 or 1 = synchronous save)")
+    p.add_argument("--save-queue-max", type=int, default=64,
+                   help="maximum number of queued save tasks for backpressure")
     p.add_argument("--no-cache", action="store_true",
                    help="disable tile cache (local and shared)")
     p.add_argument("--verbose", action="store_true",
@@ -311,6 +329,7 @@ def main():
             "components_total": tile_result.components_total,
             "components_saved": tile_result.components_saved,
             "pixels_painted": tile_result.pixels_painted,
+            "save_queue_depth": tile_result.save_queue_depth,
             "phase_ms": tile_result.phase_ms,
         }
         with runlog_path.open("a", encoding="utf-8") as fp:
@@ -341,16 +360,48 @@ def main():
     total = TileResult()
     failed_tiles = []
     slow_tiles = []
+    total_save_ms = 0
+    save_workers = max(0, args.save_workers)
+    async_save_enabled = save_workers > 1 and args.workers == 1
+    if args.save_workers > 1 and args.workers != 1:
+        print("[WARN] --save-workers > 1 is supported only with --workers 1; using synchronous save.")
+
+    save_executor = ThreadPoolExecutor(max_workers=save_workers) if async_save_enabled else None
+    inflight_saves = set()
+
+    def drain_save_queue(block_until_room=False):
+        nonlocal total_save_ms
+        while inflight_saves and (block_until_room or len(inflight_saves) >= args.save_queue_max):
+            done, _ = wait(inflight_saves, return_when=FIRST_COMPLETED)
+            for fut in done:
+                inflight_saves.remove(fut)
+                total_save_ms += fut.result()
+            if not block_until_room:
+                break
+
     if args.workers == 1:
         for i, task in enumerate(tasks, 1):
             _, x, y, *_ = task
             try:
-                tile_result = process_tile(
-                    Path(task[0]), task[1], task[2], task[3], task[4], Path(task[5]), task[6],
-                    use_cache=task[7],
-                    use_shared_cache=(not args.no_cache),
-                    skip_existing=task[8],
-                )
+                if async_save_enabled:
+                    tile_result, pending_outputs = process_tile(
+                        Path(task[0]), task[1], task[2], task[3], task[4], Path(task[5]), task[6],
+                        use_cache=task[7],
+                        use_shared_cache=(not args.no_cache),
+                        skip_existing=task[8],
+                        collect_outputs=True,
+                    )
+                    for out_path, crop in pending_outputs:
+                        drain_save_queue(block_until_room=False)
+                        inflight_saves.add(save_executor.submit(save_artwork, out_path, crop))
+                    tile_result.save_queue_depth = len(inflight_saves)
+                else:
+                    tile_result = process_tile(
+                        Path(task[0]), task[1], task[2], task[3], task[4], Path(task[5]), task[6],
+                        use_cache=task[7],
+                        use_shared_cache=(not args.no_cache),
+                        skip_existing=task[8],
+                    )
                 total.saved += tile_result.saved
                 total.skipped_existing += tile_result.skipped_existing
                 total.skipped_small += tile_result.skipped_small
@@ -401,6 +452,10 @@ def main():
                     append_runlog(TileResult(x=x, y=y, errors=1))
                 maybe_report_progress(i, len(tasks))
 
+    if save_executor is not None:
+        drain_save_queue(block_until_room=True)
+        save_executor.shutdown(wait=True)
+
     if tasks:
         maybe_report_progress(len(tasks), len(tasks), force=True)
 
@@ -419,6 +474,7 @@ def main():
         f"components_total={total.components_total}, "
         f"components_saved={total.components_saved}, "
         f"pixels_painted={total.pixels_painted}"
+        f", save_ms={total_save_ms} "
         f"throughput_tiles_per_sec={throughput:.2f}"
     )
     if args.verbose and slow_tiles:
@@ -444,6 +500,7 @@ def main():
             "components_total": total.components_total,
             "components_saved": total.components_saved,
             "pixels_painted": total.pixels_painted,
+            "save_ms": total_save_ms,
             "failed_tiles": failed_tiles,
         }
         stats_path = Path(args.stats_json)
