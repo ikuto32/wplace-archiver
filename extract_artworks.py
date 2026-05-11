@@ -28,7 +28,10 @@ from scipy import ndimage
 
 @dataclass
 class TileResult:
+    x: int = 0
+    y: int = 0
     saved: int = 0
+    skipped_existing: int = 0
     skipped_small: int = 0
     skipped_center: int = 0
     skipped_empty: int = 0
@@ -92,9 +95,12 @@ def build_mosaic(tiles_dir, x, y, tile_size, tile_cache, use_shared_cache=False)
     return big, big_mask
 
 
-def process_tile(tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size, use_cache=True, use_shared_cache=False):
+def process_tile(
+    tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size,
+    use_cache=True, use_shared_cache=False, skip_existing=False,
+):
     start = perf_counter()
-    result = TileResult()
+    result = TileResult(x=x, y=y)
     central_path = neighbor_path(tiles_dir, x, y)
     tile_cache = {} if use_cache else None
 
@@ -172,7 +178,11 @@ def process_tile(tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size, use_ca
         world_x = x * tile_size + (x0 - tile_size)
         world_y = y * tile_size + (y0 - tile_size)
         out_name = f"art_x{world_x}_y{world_y}_w{x1 - x0}_h{y1 - y0}.png"
-        Image.fromarray(crop, "RGBA").save(out_dir / out_name)
+        out_path = out_dir / out_name
+        if skip_existing and out_path.exists():
+            result.skipped_existing += 1
+            continue
+        Image.fromarray(crop, "RGBA").save(out_path)
         result.saved += 1
     result.elapsed_ms = int((perf_counter() - start) * 1000)
     return result
@@ -180,15 +190,16 @@ def process_tile(tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size, use_ca
 
 def process_tile_worker(task):
     """ProcessPoolExecutor向け: シリアライズしやすい引数を受け取る。"""
-    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache = task
+    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing = task
     try:
         return process_tile(
             Path(tiles_dir_s), x, y, dilate, min_pixels, Path(out_dir_s), tile_size,
             use_cache=use_cache,
             use_shared_cache=False,
+            skip_existing=skip_existing,
         )
     except Exception:
-        return TileResult(errors=1)
+        return TileResult(x=x, y=y, errors=1)
 
 
 def main():
@@ -208,6 +219,12 @@ def main():
                    help="print failed tile coordinates")
     p.add_argument("--stats-json", default=None,
                    help="write aggregated stats as JSON to this path")
+    p.add_argument("--skip-existing", action="store_true",
+                   help="skip saving when the output file already exists")
+    p.add_argument("--runlog-jsonl", default="artworks_runlog.jsonl",
+                   help="append per-tile result records to JSONL log")
+    p.add_argument("--resume-from-log", default=None,
+                   help="path to JSONL runlog used to skip successful (x,y) tasks")
     args = p.parse_args()
 
     tiles_dir = Path(args.tiles)
@@ -220,6 +237,23 @@ def main():
         print("No tiles found. Run download_tiles.py first.")
         return
 
+    done_tasks = set()
+    if args.resume_from_log:
+        resume_path = Path(args.resume_from_log)
+        if resume_path.exists():
+            with resume_path.open("r", encoding="utf-8") as fp:
+                for line in fp:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if int(rec.get("errors", 1)) == 0 and "x" in rec and "y" in rec:
+                        done_tasks.add((int(rec["x"]), int(rec["y"])))
+        print(f"Loaded {len(done_tasks)} successful tasks from {args.resume_from_log}")
+
     tasks = []
     for tf in tile_files:
         try:
@@ -227,7 +261,27 @@ def main():
             y = int(tf.stem)
         except ValueError:
             continue
-        tasks.append((str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size, not args.no_cache))
+        if (x, y) in done_tasks:
+            continue
+        tasks.append(
+            (str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size, not args.no_cache, args.skip_existing)
+        )
+    print(f"Tasks to process: {len(tasks)}")
+
+    runlog_path = Path(args.runlog_jsonl)
+    runlog_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def append_runlog(tile_result):
+        rec = {
+            "x": tile_result.x,
+            "y": tile_result.y,
+            "saved": tile_result.saved,
+            "errors": tile_result.errors,
+            "skipped_existing": tile_result.skipped_existing,
+            "elapsed_ms": tile_result.elapsed_ms,
+        }
+        with runlog_path.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     total = TileResult()
     failed_tiles = []
@@ -239,17 +293,21 @@ def main():
                     Path(task[0]), task[1], task[2], task[3], task[4], Path(task[5]), task[6],
                     use_cache=task[7],
                     use_shared_cache=(not args.no_cache),
+                    skip_existing=task[8],
                 )
                 total.saved += tile_result.saved
+                total.skipped_existing += tile_result.skipped_existing
                 total.skipped_small += tile_result.skipped_small
                 total.skipped_center += tile_result.skipped_center
                 total.skipped_empty += tile_result.skipped_empty
                 total.errors += tile_result.errors
                 total.elapsed_ms += tile_result.elapsed_ms
+                append_runlog(tile_result)
             except Exception as e:
                 print(f"[ERROR] tile ({x}, {y}) failed: {e}")
                 total.errors += 1
                 failed_tiles.append((x, y))
+                append_runlog(TileResult(x=x, y=y, errors=1))
             if i % 200 == 0:
                 print(f"[{i}/{len(tasks)}] artworks saved so far: {total.saved}")
     else:
@@ -264,23 +322,27 @@ def main():
                 try:
                     tile_result = fut.result()
                     total.saved += tile_result.saved
+                    total.skipped_existing += tile_result.skipped_existing
                     total.skipped_small += tile_result.skipped_small
                     total.skipped_center += tile_result.skipped_center
                     total.skipped_empty += tile_result.skipped_empty
                     total.errors += tile_result.errors
                     total.elapsed_ms += tile_result.elapsed_ms
+                    append_runlog(tile_result)
                     if tile_result.errors > 0:
                         failed_tiles.append((x, y))
                 except Exception as e:
                     print(f"[ERROR] tile ({x}, {y}) failed: {e}")
                     total.errors += 1
                     failed_tiles.append((x, y))
+                    append_runlog(TileResult(x=x, y=y, errors=1))
                 if i % 200 == 0:
                     print(f"[{i}/{len(tasks)}] artworks saved so far: {total.saved}")
 
     print(f"\nDone. Saved {total.saved} artworks to {out_dir}/")
     print(
         "Breakdown: "
+        f"skipped_existing={total.skipped_existing}, "
         f"skipped_small={total.skipped_small}, "
         f"skipped_center={total.skipped_center}, "
         f"skipped_empty={total.skipped_empty}, "
@@ -296,6 +358,7 @@ def main():
         stats_payload = {
             "tiles_total": len(tasks),
             "saved": total.saved,
+            "skipped_existing": total.skipped_existing,
             "skipped_small": total.skipped_small,
             "skipped_center": total.skipped_center,
             "skipped_empty": total.skipped_empty,
