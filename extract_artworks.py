@@ -161,16 +161,22 @@ def process_tile(
 
     cy0, cx0 = tile_size, tile_size
     cy1, cx1 = tile_size * 2, tile_size * 2
+    objects = ndimage.find_objects(labeled)
+
     # 各成分ごとに処理
-    for label_id in range(1, n + 1):
-        comp = labeled == label_id
-        # 元の塗られたピクセルのみで囲む
-        original = comp & big_mask
-        if not original.any():
+    for label_id, slc in enumerate(objects, start=1):
+        if slc is None:
             continue
-        ys, xs = np.where(original)
-        y0, y1 = int(ys.min()), int(ys.max() + 1)
-        x0, x1 = int(xs.min()), int(xs.max() + 1)
+        local = (labeled[slc] == label_id)
+        # 元の塗られたピクセルのみで囲む
+        original_local = local & big_mask[slc]
+        if not original_local.any():
+            continue
+        ys, xs = np.where(original_local)
+        y0 = slc[0].start + int(ys.min())
+        y1 = slc[0].start + int(ys.max() + 1)
+        x0 = slc[1].start + int(xs.min())
+        x1 = slc[1].start + int(xs.max() + 1)
 
         # 中心が中央タイル内にあるものだけ保存(タイル境界での重複防止)
         cy = (y0 + y1) // 2
@@ -180,14 +186,14 @@ def process_tile(
             continue
 
         # ノイズ除去
-        pixels = int(original.sum())
+        pixels = int(original_local.sum())
         if pixels < min_pixels:
             result.skipped_small += 1
             continue
 
         # 切り出し: バウンディングボックス内、成分外は透明にする
         crop = big[y0:y1, x0:x1].copy()
-        crop_mask = original[y0:y1, x0:x1]
+        crop_mask = original_local[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
         crop[~crop_mask] = (0, 0, 0, 0)
 
         # ワールド座標(全体マップ上のピクセル位置)
