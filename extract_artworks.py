@@ -85,15 +85,16 @@ def neighbor_path(tiles_dir, x, y):
     return tiles_dir / str(x) / f"{y}.png"
 
 
-def build_mosaic(tiles_dir, x, y, tile_size, tile_cache, use_shared_cache=False):
+def build_mosaic(tiles_dir, x, y, tile_size, tile_cache, available_tiles, use_shared_cache=False):
     """中央タイル(x,y) + 周囲8タイルを3x3に結合して返す。"""
     big = np.zeros((tile_size * 3, tile_size * 3, 4), dtype=np.uint8)
     big_mask = np.zeros((tile_size * 3, tile_size * 3), dtype=bool)
     for dy in (-1, 0, 1):
         for dx in (-1, 0, 1):
-            p = neighbor_path(tiles_dir, x + dx, y + dy)
-            if not p.exists():
+            neighbor = (x + dx, y + dy)
+            if neighbor not in available_tiles:
                 continue
+            p = neighbor_path(tiles_dir, neighbor[0], neighbor[1])
             t = tile_cache.get(p)
             if t is None:
                 t = load_tile(p, use_shared_cache=use_shared_cache)
@@ -113,7 +114,8 @@ def build_mosaic(tiles_dir, x, y, tile_size, tile_cache, use_shared_cache=False)
 
 def process_tile(
     tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size,
-    use_cache=True, use_shared_cache=False, skip_existing=False,
+
+    use_cache=True, use_shared_cache=False, skip_existing=False, available_tiles=None,
     collect_outputs=False,
 ):
     start = perf_counter()
@@ -123,6 +125,8 @@ def process_tile(
     t_save = 0.0
     result = TileResult(x=x, y=y)
     central_path = neighbor_path(tiles_dir, x, y)
+    if available_tiles is None:
+        available_tiles = {(x, y)}
     tile_cache = {} if use_cache else None
 
     t0 = perf_counter()
@@ -148,6 +152,7 @@ def process_tile(
     big, big_mask = build_mosaic(
         tiles_dir, x, y, tile_size,
         tile_cache if tile_cache is not None else {},
+        available_tiles,
         use_shared_cache=use_shared_cache,
     )
     t_mosaic += perf_counter() - t0
@@ -249,13 +254,14 @@ def save_artwork(out_path, crop):
 
 def process_tile_worker(task):
     """ProcessPoolExecutor向け: シリアライズしやすい引数を受け取る。"""
-    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing = task
+    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing, available_tiles = task
     try:
         return process_tile(
             Path(tiles_dir_s), x, y, dilate, min_pixels, Path(out_dir_s), tile_size,
             use_cache=use_cache,
             use_shared_cache=False,
             skip_existing=skip_existing,
+            available_tiles=available_tiles,
         )
     except Exception:
         return TileResult(x=x, y=y, errors=1)
@@ -319,6 +325,7 @@ def main():
                         done_tasks.add((int(rec["x"]), int(rec["y"])))
         print(f"Loaded {len(done_tasks)} successful tasks from {args.resume_from_log}")
 
+    available_tiles = set()
     tasks = []
     for tf in tile_files:
         try:
@@ -326,10 +333,11 @@ def main():
             y = int(tf.stem)
         except ValueError:
             continue
+        available_tiles.add((x, y))
         if (x, y) in done_tasks:
             continue
         tasks.append(
-            (str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size, not args.no_cache, args.skip_existing)
+            (str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size, not args.no_cache, args.skip_existing, available_tiles)
         )
     print(f"Tasks to process: {len(tasks)}")
 
@@ -401,12 +409,14 @@ def main():
         for i, task in enumerate(tasks, 1):
             _, x, y, *_ = task
             try:
+
                 if async_save_enabled:
                     tile_result, pending_outputs = process_tile(
                         Path(task[0]), task[1], task[2], task[3], task[4], Path(task[5]), task[6],
                         use_cache=task[7],
                         use_shared_cache=(not args.no_cache),
                         skip_existing=task[8],
+                        available_tiles=task[9],
                         collect_outputs=True,
                     )
                     for out_path, crop in pending_outputs:
@@ -419,7 +429,9 @@ def main():
                         use_cache=task[7],
                         use_shared_cache=(not args.no_cache),
                         skip_existing=task[8],
+                        available_tiles=task[9],
                     )
+                
                 total.saved += tile_result.saved
                 total.skipped_existing += tile_result.skipped_existing
                 total.skipped_small += tile_result.skipped_small
