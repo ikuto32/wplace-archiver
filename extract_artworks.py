@@ -252,6 +252,8 @@ def main():
                    help="append per-tile result records to JSONL log")
     p.add_argument("--resume-from-log", default=None,
                    help="path to JSONL runlog used to skip successful (x,y) tasks")
+    p.add_argument("--progress-interval", type=float, default=1.0,
+                   help="progress reporting interval in seconds (default 1.0)")
     args = p.parse_args()
 
     tiles_dir = Path(args.tiles)
@@ -314,6 +316,28 @@ def main():
         with runlog_path.open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+    start_ts = perf_counter()
+    last_report_ts = start_ts
+
+    def report_progress(done, total_tasks, total_saved, total_errors, total_elapsed_ms):
+        elapsed_s = max(perf_counter() - start_ts, 1e-9)
+        speed = done / elapsed_s
+        rate_pct = (done / total_tasks * 100.0) if total_tasks else 100.0
+        eta_s = ((total_tasks - done) / speed) if speed > 0 else float("inf")
+        eta_text = f"{eta_s:.1f}s" if eta_s != float("inf") else "N/A"
+        print(
+            f"[{rate_pct:6.2f}%] {done}/{total_tasks} | "
+            f"speed={speed:.2f} tiles/s | ETA={eta_text} | "
+            f"saved={total_saved} errors={total_errors} elapsed_ms={total_elapsed_ms}"
+        )
+
+    def maybe_report_progress(done, total_tasks, force=False):
+        nonlocal last_report_ts
+        now = perf_counter()
+        if force or (now - last_report_ts) >= args.progress_interval:
+            report_progress(done, total_tasks, total.saved, total.errors, total.elapsed_ms)
+            last_report_ts = now
+
     total = TileResult()
     failed_tiles = []
     slow_tiles = []
@@ -344,8 +368,7 @@ def main():
                 total.errors += 1
                 failed_tiles.append((x, y))
                 append_runlog(TileResult(x=x, y=y, errors=1))
-            if i % 200 == 0:
-                print(f"[{i}/{len(tasks)}] artworks saved so far: {total.saved}")
+            maybe_report_progress(i, len(tasks))
     else:
         workers = max(1, args.workers or 1)
         with ProcessPoolExecutor(max_workers=workers) as executor:
@@ -376,8 +399,13 @@ def main():
                     total.errors += 1
                     failed_tiles.append((x, y))
                     append_runlog(TileResult(x=x, y=y, errors=1))
-                if i % 200 == 0:
-                    print(f"[{i}/{len(tasks)}] artworks saved so far: {total.saved}")
+                maybe_report_progress(i, len(tasks))
+
+    if tasks:
+        maybe_report_progress(len(tasks), len(tasks), force=True)
+
+    wall_elapsed_s = max(perf_counter() - start_ts, 1e-9)
+    throughput = len(tasks) / wall_elapsed_s
 
     print(f"\nDone. Saved {total.saved} artworks to {out_dir}/")
     print(
@@ -391,6 +419,7 @@ def main():
         f"components_total={total.components_total}, "
         f"components_saved={total.components_saved}, "
         f"pixels_painted={total.pixels_painted}"
+        f"throughput_tiles_per_sec={throughput:.2f}"
     )
     if args.verbose and slow_tiles:
         top_n = min(10, len(slow_tiles))
