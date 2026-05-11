@@ -24,6 +24,7 @@ from time import perf_counter
 import numpy as np
 from PIL import Image
 from scipy import ndimage
+from tqdm import tqdm
 
 
 STRUCT_CACHE: dict[int, np.ndarray] = {}
@@ -381,6 +382,7 @@ def main():
         now = perf_counter()
         if force or (now - last_report_ts) >= args.progress_interval:
             report_progress(done, total_tasks, total.saved, total.errors, total.elapsed_ms)
+            refresh_progress(done)
             last_report_ts = now
 
     total = TileResult()
@@ -394,6 +396,13 @@ def main():
 
     save_executor = ThreadPoolExecutor(max_workers=save_workers) if async_save_enabled else None
     inflight_saves = set()
+
+    progress_bar = tqdm(total=len(tasks), desc="Extracting artworks", unit="tile")
+
+    def refresh_progress(done):
+        progress_bar.n = done
+        progress_bar.set_postfix(saved=total.saved, errors=total.errors, refresh=False)
+        progress_bar.refresh()
 
     def drain_save_queue(block_until_room=False):
         nonlocal total_save_ms
@@ -486,6 +495,7 @@ def main():
 
     if tasks:
         maybe_report_progress(len(tasks), len(tasks), force=True)
+    progress_bar.close()
 
     wall_elapsed_s = max(perf_counter() - start_ts, 1e-9)
     throughput = len(tasks) / wall_elapsed_s
