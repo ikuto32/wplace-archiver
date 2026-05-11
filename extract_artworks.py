@@ -28,6 +28,7 @@ from tqdm import tqdm
 
 
 STRUCT_CACHE: dict[int, np.ndarray] = {}
+WORKER_AVAILABLE_TILES = None
 
 
 def get_struct(dilate):
@@ -253,16 +254,21 @@ def save_artwork(out_path, crop):
     return int((perf_counter() - t0) * 1000)
 
 
+def init_worker(available_tiles):
+    global WORKER_AVAILABLE_TILES
+    WORKER_AVAILABLE_TILES = available_tiles
+
+
 def process_tile_worker(task):
     """ProcessPoolExecutor向け: シリアライズしやすい引数を受け取る。"""
-    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing, available_tiles = task
+    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing = task
     try:
         return process_tile(
             Path(tiles_dir_s), x, y, dilate, min_pixels, Path(out_dir_s), tile_size,
             use_cache=use_cache,
             use_shared_cache=False,
             skip_existing=skip_existing,
-            available_tiles=available_tiles,
+            available_tiles=WORKER_AVAILABLE_TILES,
         )
     except Exception:
         return TileResult(x=x, y=y, errors=1)
@@ -327,7 +333,7 @@ def main():
         print(f"Loaded {len(done_tasks)} successful tasks from {args.resume_from_log}")
 
     available_tiles = set()
-    tasks = []
+    task_coords = []
     for tf in tile_files:
         try:
             x = int(tf.parent.name)
@@ -337,9 +343,11 @@ def main():
         available_tiles.add((x, y))
         if (x, y) in done_tasks:
             continue
-        tasks.append(
-            (str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size, not args.no_cache, args.skip_existing, available_tiles)
-        )
+        task_coords.append((x, y))
+    tasks = [
+        (str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size, not args.no_cache, args.skip_existing)
+        for x, y in task_coords
+    ]
     print(f"Tasks to process: {len(tasks)}")
 
     runlog_path = Path(args.runlog_jsonl)
@@ -441,7 +449,7 @@ def main():
                         use_cache=task[7],
                         use_shared_cache=(not args.no_cache),
                         skip_existing=task[8],
-                        available_tiles=task[9],
+                        available_tiles=available_tiles,
                         collect_outputs=True,
                     )
                     for out_path, crop in pending_outputs:
@@ -454,7 +462,7 @@ def main():
                         use_cache=task[7],
                         use_shared_cache=(not args.no_cache),
                         skip_existing=task[8],
-                        available_tiles=task[9],
+                        available_tiles=available_tiles,
                     )
                 
                 accumulate_tile_result(tile_result)
@@ -468,7 +476,7 @@ def main():
             maybe_report_progress(i, len(tasks))
     else:
         workers = max(1, args.workers or 1)
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        with ProcessPoolExecutor(max_workers=workers, initializer=init_worker, initargs=(frozenset(available_tiles),)) as executor:
             futures = {
                 executor.submit(process_tile_worker, task): (task[1], task[2])
                 for task in tasks
