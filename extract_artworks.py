@@ -16,7 +16,7 @@ import argparse
 import json
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from time import perf_counter
@@ -37,6 +37,10 @@ class TileResult:
     skipped_empty: int = 0
     errors: int = 0
     elapsed_ms: int = 0
+    components_total: int = 0
+    components_saved: int = 0
+    pixels_painted: int = 0
+    phase_ms: dict = field(default_factory=dict)
 
 
 def _load_tile_impl(path):
@@ -100,10 +104,15 @@ def process_tile(
     use_cache=True, use_shared_cache=False, skip_existing=False,
 ):
     start = perf_counter()
+    t_load = 0.0
+    t_mosaic = 0.0
+    t_label = 0.0
+    t_save = 0.0
     result = TileResult(x=x, y=y)
     central_path = neighbor_path(tiles_dir, x, y)
     tile_cache = {} if use_cache else None
 
+    t0 = perf_counter()
     if tile_cache is not None:
         central = tile_cache.get(central_path)
         if central is None:
@@ -111,6 +120,7 @@ def process_tile(
             tile_cache[central_path] = central
     else:
         central = load_tile(central_path, use_shared_cache=False)
+    t_load += perf_counter() - t0
     if central is None or not central[1].any():
         result.skipped_empty = 1
         result.elapsed_ms = int((perf_counter() - start) * 1000)
@@ -121,17 +131,20 @@ def process_tile(
         # 想定外サイズの場合は使う
         tile_size = h
 
+    t0 = perf_counter()
     big, big_mask = build_mosaic(
         tiles_dir, x, y, tile_size,
         tile_cache if tile_cache is not None else {},
         use_shared_cache=use_shared_cache,
     )
+    t_mosaic += perf_counter() - t0
     if not big_mask.any():
         result.skipped_empty = 1
         result.elapsed_ms = int((perf_counter() - start) * 1000)
         return result
 
     # 近接ピクセルを束ねる
+    t0 = perf_counter()
     if dilate > 0:
         struct = np.ones((dilate * 2 + 1, dilate * 2 + 1), dtype=bool)
         merged = ndimage.binary_dilation(big_mask, structure=struct)
@@ -139,6 +152,8 @@ def process_tile(
         merged = big_mask
 
     labeled, n = ndimage.label(merged)
+    t_label += perf_counter() - t0
+    result.components_total = int(n)
     if n == 0:
         result.skipped_empty = 1
         result.elapsed_ms = int((perf_counter() - start) * 1000)
@@ -165,7 +180,8 @@ def process_tile(
             continue
 
         # ノイズ除去
-        if int(original.sum()) < min_pixels:
+        pixels = int(original.sum())
+        if pixels < min_pixels:
             result.skipped_small += 1
             continue
 
@@ -182,9 +198,20 @@ def process_tile(
         if skip_existing and out_path.exists():
             result.skipped_existing += 1
             continue
+        t1 = perf_counter()
         Image.fromarray(crop, "RGBA").save(out_path)
+        t_save += perf_counter() - t1
         result.saved += 1
+        result.components_saved += 1
+        result.pixels_painted += pixels
     result.elapsed_ms = int((perf_counter() - start) * 1000)
+    result.phase_ms = {
+        "load": int(t_load * 1000),
+        "mosaic": int(t_mosaic * 1000),
+        "label": int(t_label * 1000),
+        "save": int(t_save * 1000),
+        "total": result.elapsed_ms,
+    }
     return result
 
 
@@ -279,12 +306,17 @@ def main():
             "errors": tile_result.errors,
             "skipped_existing": tile_result.skipped_existing,
             "elapsed_ms": tile_result.elapsed_ms,
+            "components_total": tile_result.components_total,
+            "components_saved": tile_result.components_saved,
+            "pixels_painted": tile_result.pixels_painted,
+            "phase_ms": tile_result.phase_ms,
         }
         with runlog_path.open("a", encoding="utf-8") as fp:
             fp.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     total = TileResult()
     failed_tiles = []
+    slow_tiles = []
     if args.workers == 1:
         for i, task in enumerate(tasks, 1):
             _, x, y, *_ = task
@@ -302,7 +334,11 @@ def main():
                 total.skipped_empty += tile_result.skipped_empty
                 total.errors += tile_result.errors
                 total.elapsed_ms += tile_result.elapsed_ms
+                total.components_total += tile_result.components_total
+                total.components_saved += tile_result.components_saved
+                total.pixels_painted += tile_result.pixels_painted
                 append_runlog(tile_result)
+                slow_tiles.append(tile_result)
             except Exception as e:
                 print(f"[ERROR] tile ({x}, {y}) failed: {e}")
                 total.errors += 1
@@ -328,7 +364,11 @@ def main():
                     total.skipped_empty += tile_result.skipped_empty
                     total.errors += tile_result.errors
                     total.elapsed_ms += tile_result.elapsed_ms
+                    total.components_total += tile_result.components_total
+                    total.components_saved += tile_result.components_saved
+                    total.pixels_painted += tile_result.pixels_painted
                     append_runlog(tile_result)
+                    slow_tiles.append(tile_result)
                     if tile_result.errors > 0:
                         failed_tiles.append((x, y))
                 except Exception as e:
@@ -347,8 +387,16 @@ def main():
         f"skipped_center={total.skipped_center}, "
         f"skipped_empty={total.skipped_empty}, "
         f"errors={total.errors}, "
-        f"elapsed_ms={total.elapsed_ms}"
+        f"elapsed_ms={total.elapsed_ms}, "
+        f"components_total={total.components_total}, "
+        f"components_saved={total.components_saved}, "
+        f"pixels_painted={total.pixels_painted}"
     )
+    if args.verbose and slow_tiles:
+        top_n = min(10, len(slow_tiles))
+        print(f"Top {top_n} slowest tiles by elapsed_ms:")
+        for tr in sorted(slow_tiles, key=lambda r: r.elapsed_ms, reverse=True)[:top_n]:
+            print(f"  ({tr.x}, {tr.y}) elapsed_ms={tr.elapsed_ms} saved={tr.saved} errors={tr.errors}")
     if args.verbose and failed_tiles:
         print("Failed tiles:")
         for x, y in failed_tiles:
@@ -364,6 +412,9 @@ def main():
             "skipped_empty": total.skipped_empty,
             "errors": total.errors,
             "elapsed_ms": total.elapsed_ms,
+            "components_total": total.components_total,
+            "components_saved": total.components_saved,
+            "pixels_painted": total.pixels_painted,
             "failed_tiles": failed_tiles,
         }
         stats_path = Path(args.stats_json)
