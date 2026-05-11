@@ -10,6 +10,7 @@ dependencies = [
   "Pillow>=12.2.0",
   "tqdm>=4.66",
   "backports.zstd; python_version < '3.14'",
+  "scipy>=1.17.1",
 ]
 
 [project.optional-dependencies]

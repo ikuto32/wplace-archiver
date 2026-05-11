@@ -11,10 +11,10 @@ shard_tiles = 32
 max_colors = 64
 
 max_concurrent_downloads = 4
-workers = 4
-prefetch_factor = 4
-apply_workers = 4
-decode_workers = 4
+workers = 8
+prefetch_factor = 8
+apply_workers = 8
+decode_workers = 8
 io_buffer_bytes = 16777216
 
 compression_backend = "auto"
@@ -36,7 +36,7 @@ rgb_transparent_colors = ""
 rgb_transparent_dominant_min = 0.9
 black_warning_ratio = 0.7
 
-ingest_prescan = false
+ingest_prescan = true
 
-apply_executor = "thread"
-apply_max_tasks_per_child = 0
+apply_executor = "process"
+apply_max_tasks_per_child = 1

@@ -193,7 +193,7 @@ def process_tile_worker(task):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--tiles", default="tiles", help="downloaded tiles directory")
+    p.add_argument("--tiles", default="wplace_xyz/11", help="downloaded tiles directory")
     p.add_argument("--out", default="artworks", help="output directory for cropped artworks")
     p.add_argument("--dilate", type=int, default=3,
                    help="px dilation radius for grouping nearby pixels (default 3)")
