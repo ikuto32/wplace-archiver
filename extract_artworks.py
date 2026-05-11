@@ -15,6 +15,7 @@
 import argparse
 import os
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,7 @@ from PIL import Image
 from scipy import ndimage
 
 
-def load_tile(path):
+def _load_tile_impl(path):
     """RGBA配列とアルファ>0のboolマスクを返す。読めなければNone。"""
     try:
         img = Image.open(path).convert("RGBA")
@@ -31,14 +32,28 @@ def load_tile(path):
     arr = np.array(img)
     if arr.ndim != 3 or arr.shape[2] != 4:
         return None
-    return arr, arr[..., 3] > 0
+    arr.setflags(write=False)
+    mask = arr[..., 3] > 0
+    mask.setflags(write=False)
+    return arr, mask
+
+
+@lru_cache(maxsize=8192)
+def _load_tile_cached(path_str):
+    return _load_tile_impl(Path(path_str))
+
+
+def load_tile(path, use_shared_cache=False):
+    if use_shared_cache:
+        return _load_tile_cached(str(path))
+    return _load_tile_impl(path)
 
 
 def neighbor_path(tiles_dir, x, y):
     return tiles_dir / str(x) / f"{y}.png"
 
 
-def build_mosaic(tiles_dir, x, y, tile_size):
+def build_mosaic(tiles_dir, x, y, tile_size, tile_cache, use_shared_cache=False):
     """中央タイル(x,y) + 周囲8タイルを3x3に結合して返す。"""
     big = np.zeros((tile_size * 3, tile_size * 3, 4), dtype=np.uint8)
     big_mask = np.zeros((tile_size * 3, tile_size * 3), dtype=bool)
@@ -47,7 +62,10 @@ def build_mosaic(tiles_dir, x, y, tile_size):
             p = neighbor_path(tiles_dir, x + dx, y + dy)
             if not p.exists():
                 continue
-            t = load_tile(p)
+            t = tile_cache.get(p)
+            if t is None:
+                t = load_tile(p, use_shared_cache=use_shared_cache)
+                tile_cache[p] = t
             if t is None:
                 continue
             arr, m = t
@@ -61,9 +79,17 @@ def build_mosaic(tiles_dir, x, y, tile_size):
     return big, big_mask
 
 
-def process_tile(tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size):
+def process_tile(tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size, use_cache=True, use_shared_cache=False):
     central_path = neighbor_path(tiles_dir, x, y)
-    central = load_tile(central_path)
+    tile_cache = {} if use_cache else None
+
+    if tile_cache is not None:
+        central = tile_cache.get(central_path)
+        if central is None:
+            central = load_tile(central_path, use_shared_cache=use_shared_cache)
+            tile_cache[central_path] = central
+    else:
+        central = load_tile(central_path, use_shared_cache=False)
     if central is None or not central[1].any():
         return 0
     # central tileのサイズ確定
@@ -72,7 +98,11 @@ def process_tile(tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size):
         # 想定外サイズの場合は使う
         tile_size = h
 
-    big, big_mask = build_mosaic(tiles_dir, x, y, tile_size)
+    big, big_mask = build_mosaic(
+        tiles_dir, x, y, tile_size,
+        tile_cache if tile_cache is not None else {},
+        use_shared_cache=use_shared_cache,
+    )
     if not big_mask.any():
         return 0
 
@@ -128,8 +158,12 @@ def process_tile(tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size):
 
 def process_tile_worker(task):
     """ProcessPoolExecutor向け: シリアライズしやすい引数を受け取る。"""
-    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size = task
-    return process_tile(Path(tiles_dir_s), x, y, dilate, min_pixels, Path(out_dir_s), tile_size)
+    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache = task
+    return process_tile(
+        Path(tiles_dir_s), x, y, dilate, min_pixels, Path(out_dir_s), tile_size,
+        use_cache=use_cache,
+        use_shared_cache=False,
+    )
 
 
 def main():
@@ -143,6 +177,8 @@ def main():
     p.add_argument("--tile-size", type=int, default=1000, help="tile pixel size (default 1000)")
     p.add_argument("--workers", type=int, default=os.cpu_count(),
                    help="number of worker processes (default: os.cpu_count(), 1 = serial)")
+    p.add_argument("--no-cache", action="store_true",
+                   help="disable tile cache (local and shared)")
     args = p.parse_args()
 
     tiles_dir = Path(args.tiles)
@@ -162,14 +198,18 @@ def main():
             y = int(tf.stem)
         except ValueError:
             continue
-        tasks.append((str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size))
+        tasks.append((str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size, not args.no_cache))
 
     total = 0
     if args.workers == 1:
         for i, task in enumerate(tasks, 1):
             _, x, y, *_ = task
             try:
-                total += process_tile_worker(task)
+                total += process_tile(
+                    Path(task[0]), task[1], task[2], task[3], task[4], Path(task[5]), task[6],
+                    use_cache=task[7],
+                    use_shared_cache=(not args.no_cache),
+                )
             except Exception as e:
                 print(f"[ERROR] tile ({x}, {y}) failed: {e}")
             if i % 200 == 0:
