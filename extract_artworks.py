@@ -13,14 +13,13 @@
     python extract_artworks.py --dilate 3 --min-pixels 16
 """
 import argparse
-import fcntl
 import json
 import os
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from time import perf_counter
+from time import perf_counter, sleep
 
 import numpy as np
 from PIL import Image
@@ -30,6 +29,33 @@ from tqdm import tqdm
 
 STRUCT_CACHE: dict[int, np.ndarray] = {}
 WORKER_AVAILABLE_TILES = None
+
+
+class InterProcessLock:
+    """簡易的なプロセス間ロック。lockファイルを排他的に作成して制御する。"""
+
+    def __init__(self, lock_path: Path, poll_interval: float = 0.05) -> None:
+        self.lock_path = lock_path
+        self.poll_interval = poll_interval
+        self.fd = None
+
+    def __enter__(self):
+        while True:
+            try:
+                self.fd = os.open(self.lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+                break
+            except FileExistsError:
+                sleep(self.poll_interval)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+        try:
+            self.lock_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def allocate_output_path(out_dir: Path, out_name: str, max_files_per_dir: int) -> Path:
@@ -42,32 +68,26 @@ def allocate_output_path(out_dir: Path, out_name: str, max_files_per_dir: int) -
 
     meta_path = out_dir / ".dir_split_state.json"
     lock_path = out_dir / ".dir_split_state.lock"
-    lock_path.touch(exist_ok=True)
+    with InterProcessLock(lock_path):
+        if meta_path.exists():
+            with meta_path.open("r", encoding="utf-8") as fp:
+                state = json.load(fp)
+        else:
+            state = {"shard": 0, "count": 0}
 
-    with lock_path.open("r+", encoding="utf-8") as lock_fp:
-        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
-        try:
-            if meta_path.exists():
-                with meta_path.open("r", encoding="utf-8") as fp:
-                    state = json.load(fp)
-            else:
-                state = {"shard": 0, "count": 0}
+        shard = int(state.get("shard", 0))
+        count = int(state.get("count", 0))
+        if count >= max_files_per_dir:
+            shard += 1
+            count = 0
 
-            shard = int(state.get("shard", 0))
-            count = int(state.get("count", 0))
-            if count >= max_files_per_dir:
-                shard += 1
-                count = 0
+        shard_dir = out_dir if shard == 0 else out_dir / f"artworks_part_{shard:05d}"
+        shard_dir.mkdir(parents=True, exist_ok=True)
 
-            shard_dir = out_dir if shard == 0 else out_dir / f"artworks_part_{shard:05d}"
-            shard_dir.mkdir(parents=True, exist_ok=True)
-
-            state["shard"] = shard
-            state["count"] = count + 1
-            with meta_path.open("w", encoding="utf-8") as fp:
-                json.dump(state, fp, ensure_ascii=False)
-        finally:
-            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+        state["shard"] = shard
+        state["count"] = count + 1
+        with meta_path.open("w", encoding="utf-8") as fp:
+            json.dump(state, fp, ensure_ascii=False)
 
     return shard_dir / out_name
 
