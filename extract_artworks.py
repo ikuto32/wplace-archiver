@@ -280,7 +280,7 @@ def main():
     p.add_argument("--out", default="artworks", help="output directory for cropped artworks")
     p.add_argument("--dilate", type=int, default=3,
                    help="px dilation radius for grouping nearby pixels (default 3)")
-    p.add_argument("--min-pixels", type=int, default=16,
+    p.add_argument("--min-pixels", type=int, default=64,
                    help="minimum painted pixels to count as an artwork (filters noise)")
     p.add_argument("--tile-size", type=int, default=1000, help="tile pixel size (default 1000)")
     p.add_argument("--workers", type=int, default=os.cpu_count(),
@@ -334,7 +334,7 @@ def main():
 
     available_tiles = set()
     task_coords = []
-    for tf in tile_files:
+    for tf in tqdm(tile_files, desc="Processing tiles"):
         try:
             x = int(tf.parent.name)
             y = int(tf.stem)
