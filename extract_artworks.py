@@ -13,6 +13,7 @@
     python extract_artworks.py --dilate 3 --min-pixels 16
 """
 import argparse
+import fcntl
 import json
 import os
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed, wait, FIRST_COMPLETED
@@ -29,6 +30,46 @@ from tqdm import tqdm
 
 STRUCT_CACHE: dict[int, np.ndarray] = {}
 WORKER_AVAILABLE_TILES = None
+
+
+def allocate_output_path(out_dir: Path, out_name: str, max_files_per_dir: int) -> Path:
+    """
+    保存先ディレクトリをmax_files_per_dir件ごとに分割して返す。
+    ルート配下に artworks_part_00001 のような連番ディレクトリを作る。
+    """
+    if max_files_per_dir <= 0:
+        return out_dir / out_name
+
+    meta_path = out_dir / ".dir_split_state.json"
+    lock_path = out_dir / ".dir_split_state.lock"
+    lock_path.touch(exist_ok=True)
+
+    with lock_path.open("r+", encoding="utf-8") as lock_fp:
+        fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+        try:
+            if meta_path.exists():
+                with meta_path.open("r", encoding="utf-8") as fp:
+                    state = json.load(fp)
+            else:
+                state = {"shard": 0, "count": 0}
+
+            shard = int(state.get("shard", 0))
+            count = int(state.get("count", 0))
+            if count >= max_files_per_dir:
+                shard += 1
+                count = 0
+
+            shard_dir = out_dir if shard == 0 else out_dir / f"artworks_part_{shard:05d}"
+            shard_dir.mkdir(parents=True, exist_ok=True)
+
+            state["shard"] = shard
+            state["count"] = count + 1
+            with meta_path.open("w", encoding="utf-8") as fp:
+                json.dump(state, fp, ensure_ascii=False)
+        finally:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_UN)
+
+    return shard_dir / out_name
 
 
 def get_struct(dilate):
@@ -48,6 +89,7 @@ class TileResult:
     skipped_small: int = 0
     skipped_center: int = 0
     skipped_empty: int = 0
+    skipped_monochrome: int = 0
     errors: int = 0
     elapsed_ms: int = 0
     components_total: int = 0
@@ -118,7 +160,7 @@ def process_tile(
     tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size,
 
     use_cache=True, use_shared_cache=False, skip_existing=False, available_tiles=None,
-    collect_outputs=False,
+    collect_outputs=False, max_files_per_dir=100000,
 ):
     start = perf_counter()
     t_load = 0.0
@@ -218,14 +260,20 @@ def process_tile(
         crop_mask = original_local[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
         crop[~crop_mask] = (0, 0, 0, 0)
 
+        # 単色(塗られたピクセルが1色のみ)は保存しない
+        painted_pixels = crop[crop_mask]
+        if painted_pixels.shape[0] > 0 and np.unique(painted_pixels, axis=0).shape[0] <= 1:
+            result.skipped_monochrome += 1
+            continue
+
         # ワールド座標(全体マップ上のピクセル位置)
         world_x = x * tile_size + (x0 - tile_size)
         world_y = y * tile_size + (y0 - tile_size)
         out_name = f"art_x{world_x}_y{world_y}_w{x1 - x0}_h{y1 - y0}.png"
-        out_path = out_dir / out_name
-        if skip_existing and out_path.exists():
+        if skip_existing and any(out_dir.glob(f"**/{out_name}")):
             result.skipped_existing += 1
             continue
+        out_path = allocate_output_path(out_dir, out_name, max_files_per_dir)
         if collect_outputs:
             pending_outputs.append((out_path, crop))
         else:
@@ -261,7 +309,7 @@ def init_worker(available_tiles):
 
 def process_tile_worker(task):
     """ProcessPoolExecutor向け: シリアライズしやすい引数を受け取る。"""
-    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing = task
+    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing, max_files_per_dir = task
     try:
         return process_tile(
             Path(tiles_dir_s), x, y, dilate, min_pixels, Path(out_dir_s), tile_size,
@@ -269,6 +317,7 @@ def process_tile_worker(task):
             use_shared_cache=False,
             skip_existing=skip_existing,
             available_tiles=WORKER_AVAILABLE_TILES,
+            max_files_per_dir=max_files_per_dir,
         )
     except Exception:
         return TileResult(x=x, y=y, errors=1)
@@ -303,6 +352,8 @@ def main():
                    help="path to JSONL runlog used to skip successful (x,y) tasks")
     p.add_argument("--progress-interval", type=float, default=1.0,
                    help="progress reporting interval in seconds (default 1.0)")
+    p.add_argument("--max-files-per-dir", type=int, default=100000,
+                   help="maximum files per output directory before creating a split directory (default 100000)")
     args = p.parse_args()
 
     tiles_dir = Path(args.tiles)
@@ -345,7 +396,10 @@ def main():
             continue
         task_coords.append((x, y))
     tasks = [
-        (str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir), args.tile_size, not args.no_cache, args.skip_existing)
+        (
+            str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir),
+            args.tile_size, not args.no_cache, args.skip_existing, args.max_files_per_dir,
+        )
         for x, y in task_coords
     ]
     print(f"Tasks to process: {len(tasks)}")
@@ -360,6 +414,7 @@ def main():
             "saved": tile_result.saved,
             "errors": tile_result.errors,
             "skipped_existing": tile_result.skipped_existing,
+            "skipped_monochrome": tile_result.skipped_monochrome,
             "elapsed_ms": tile_result.elapsed_ms,
             "components_total": tile_result.components_total,
             "components_saved": tile_result.components_saved,
@@ -432,6 +487,7 @@ def main():
         total.skipped_small += tile_result.skipped_small
         total.skipped_center += tile_result.skipped_center
         total.skipped_empty += tile_result.skipped_empty
+        total.skipped_monochrome += tile_result.skipped_monochrome
         total.errors += tile_result.errors
         total.elapsed_ms += tile_result.elapsed_ms
         total.components_total += tile_result.components_total
@@ -451,6 +507,7 @@ def main():
                         skip_existing=task[8],
                         available_tiles=available_tiles,
                         collect_outputs=True,
+                        max_files_per_dir=task[9],
                     )
                     for out_path, crop in pending_outputs:
                         drain_save_queue(block_until_room=False)
@@ -463,6 +520,7 @@ def main():
                         use_shared_cache=(not args.no_cache),
                         skip_existing=task[8],
                         available_tiles=available_tiles,
+                        max_files_per_dir=task[9],
                     )
                 
                 accumulate_tile_result(tile_result)
@@ -515,6 +573,7 @@ def main():
         f"skipped_small={total.skipped_small}, "
         f"skipped_center={total.skipped_center}, "
         f"skipped_empty={total.skipped_empty}, "
+        f"skipped_monochrome={total.skipped_monochrome}, "
         f"errors={total.errors}, "
         f"elapsed_ms={total.elapsed_ms}, "
         f"components_total={total.components_total}, "
@@ -541,6 +600,7 @@ def main():
             "skipped_small": total.skipped_small,
             "skipped_center": total.skipped_center,
             "skipped_empty": total.skipped_empty,
+            "skipped_monochrome": total.skipped_monochrome,
             "errors": total.errors,
             "elapsed_ms": total.elapsed_ms,
             "components_total": total.components_total,
