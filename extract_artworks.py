@@ -48,6 +48,7 @@ class TileResult:
     skipped_small: int = 0
     skipped_center: int = 0
     skipped_empty: int = 0
+    skipped_monochrome: int = 0
     errors: int = 0
     elapsed_ms: int = 0
     components_total: int = 0
@@ -218,6 +219,12 @@ def process_tile(
         crop_mask = original_local[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
         crop[~crop_mask] = (0, 0, 0, 0)
 
+        # 単色(塗られたピクセルが1色のみ)は保存しない
+        painted_pixels = crop[crop_mask]
+        if painted_pixels.shape[0] > 0 and np.unique(painted_pixels, axis=0).shape[0] <= 1:
+            result.skipped_monochrome += 1
+            continue
+
         # ワールド座標(全体マップ上のピクセル位置)
         world_x = x * tile_size + (x0 - tile_size)
         world_y = y * tile_size + (y0 - tile_size)
@@ -360,6 +367,7 @@ def main():
             "saved": tile_result.saved,
             "errors": tile_result.errors,
             "skipped_existing": tile_result.skipped_existing,
+            "skipped_monochrome": tile_result.skipped_monochrome,
             "elapsed_ms": tile_result.elapsed_ms,
             "components_total": tile_result.components_total,
             "components_saved": tile_result.components_saved,
@@ -432,6 +440,7 @@ def main():
         total.skipped_small += tile_result.skipped_small
         total.skipped_center += tile_result.skipped_center
         total.skipped_empty += tile_result.skipped_empty
+        total.skipped_monochrome += tile_result.skipped_monochrome
         total.errors += tile_result.errors
         total.elapsed_ms += tile_result.elapsed_ms
         total.components_total += tile_result.components_total
@@ -515,6 +524,7 @@ def main():
         f"skipped_small={total.skipped_small}, "
         f"skipped_center={total.skipped_center}, "
         f"skipped_empty={total.skipped_empty}, "
+        f"skipped_monochrome={total.skipped_monochrome}, "
         f"errors={total.errors}, "
         f"elapsed_ms={total.elapsed_ms}, "
         f"components_total={total.components_total}, "
@@ -541,6 +551,7 @@ def main():
             "skipped_small": total.skipped_small,
             "skipped_center": total.skipped_center,
             "skipped_empty": total.skipped_empty,
+            "skipped_monochrome": total.skipped_monochrome,
             "errors": total.errors,
             "elapsed_ms": total.elapsed_ms,
             "components_total": total.components_total,
