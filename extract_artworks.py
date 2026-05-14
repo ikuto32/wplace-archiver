@@ -58,17 +58,20 @@ class InterProcessLock:
             pass
 
 
-def allocate_output_path(out_dir: Path, out_name: str, max_files_per_dir: int) -> Path:
+def allocate_output_path(out_dir: Path, out_name: str, max_files_per_dir: int, skip_existing: bool = False) -> Path | None:
     """
     保存先ディレクトリをmax_files_per_dir件ごとに分割して返す。
+    skip_existing=True かつ out_name が既存なら None を返す。
     ルート配下に artworks_part_00001 のような連番ディレクトリを作る。
     """
-    if max_files_per_dir <= 0:
-        return out_dir / out_name
-
     meta_path = out_dir / ".dir_split_state.json"
     lock_path = out_dir / ".dir_split_state.lock"
     with InterProcessLock(lock_path):
+        if skip_existing and any(out_dir.glob(f"**/{out_name}")):
+            return None
+
+        if max_files_per_dir <= 0:
+            return out_dir / out_name
         if meta_path.exists():
             with meta_path.open("r", encoding="utf-8") as fp:
                 state = json.load(fp)
@@ -295,10 +298,12 @@ def process_tile(
         world_x = x * tile_size + (x0 - tile_size)
         world_y = y * tile_size + (y0 - tile_size)
         out_name = f"art_x{world_x}_y{world_y}_w{x1 - x0}_h{y1 - y0}.png"
-        if skip_existing and any(out_dir.glob(f"**/{out_name}")):
+        out_path = allocate_output_path(
+            out_dir, out_name, max_files_per_dir, skip_existing=skip_existing
+        )
+        if out_path is None:
             result.skipped_existing += 1
             continue
-        out_path = allocate_output_path(out_dir, out_name, max_files_per_dir)
         if collect_outputs:
             pending_outputs.append((out_path, crop))
             result.queued_outputs += 1
