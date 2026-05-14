@@ -206,11 +206,15 @@ def process_tile(
         result.skipped_empty = 1
         result.elapsed_ms = int((perf_counter() - start) * 1000)
         return result
-    # central tileのサイズ確定
+    # central tileのサイズ確認（正方形タイル前提）
     h, w = central[0].shape[:2]
-    if h != tile_size or w != tile_size:
-        # 想定外サイズの場合は使う
-        tile_size = h
+    if h != w:
+        print(f"[ERROR] non-square tile at ({x}, {y}): actual size={w}x{h}")
+        result.errors = 1
+        result.elapsed_ms = int((perf_counter() - start) * 1000)
+        return result
+    if h != tile_size:
+        print(f"[WARN] tile size mismatch at ({x}, {y}): expected={tile_size}, actual={w}x{h}")
 
     t0 = perf_counter()
     big, big_mask = build_mosaic(
@@ -351,7 +355,7 @@ def main():
                    help="px dilation radius for grouping nearby pixels (default 3)")
     p.add_argument("--min-pixels", type=int, default=64,
                    help="minimum painted pixels to count as an artwork (filters noise)")
-    p.add_argument("--tile-size", type=int, default=1000, help="tile pixel size (default 1000)")
+    p.add_argument("--tile-size", type=int, default=1000, help="tile pixel size (square tiles only, default 1000)")
     p.add_argument("--workers", type=int, default=os.cpu_count(),
                    help="number of worker processes (default: os.cpu_count(), 1 = serial)")
     p.add_argument("--save-workers", type=int, default=1,
