@@ -178,9 +178,8 @@ def build_mosaic(tiles_dir, x, y, tile_size, tile_cache, available_tiles, use_sh
 
 def process_tile(
     tiles_dir, x, y, dilate, min_pixels, out_dir, tile_size,
-
     use_cache=True, use_shared_cache=False, skip_existing=False, available_tiles=None,
-    collect_outputs=False, max_files_per_dir=100000,
+    collect_outputs=False, max_files_per_dir=100000, existing_names=None,
 ):
     start = perf_counter()
     t_load = 0.0
@@ -290,7 +289,7 @@ def process_tile(
         world_x = x * tile_size + (x0 - tile_size)
         world_y = y * tile_size + (y0 - tile_size)
         out_name = f"art_x{world_x}_y{world_y}_w{x1 - x0}_h{y1 - y0}.png"
-        if skip_existing and any(out_dir.glob(f"**/{out_name}")):
+        if skip_existing and existing_names is not None and out_name in existing_names:
             result.skipped_existing += 1
             continue
         out_path = allocate_output_path(out_dir, out_name, max_files_per_dir)
@@ -300,6 +299,8 @@ def process_tile(
             t1 = perf_counter()
             Image.fromarray(crop, "RGBA").save(out_path)
             t_save += perf_counter() - t1
+        if existing_names is not None:
+            existing_names.add(out_name)
         result.saved += 1
         result.components_saved += 1
         result.pixels_painted += pixels
@@ -329,7 +330,7 @@ def init_worker(available_tiles):
 
 def process_tile_worker(task):
     """ProcessPoolExecutor向け: シリアライズしやすい引数を受け取る。"""
-    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing, max_files_per_dir = task
+    tiles_dir_s, x, y, dilate, min_pixels, out_dir_s, tile_size, use_cache, skip_existing, max_files_per_dir, existing_names = task
     try:
         return process_tile(
             Path(tiles_dir_s), x, y, dilate, min_pixels, Path(out_dir_s), tile_size,
@@ -338,6 +339,7 @@ def process_tile_worker(task):
             skip_existing=skip_existing,
             available_tiles=WORKER_AVAILABLE_TILES,
             max_files_per_dir=max_files_per_dir,
+            existing_names=existing_names,
         )
     except Exception:
         return TileResult(x=x, y=y, errors=1)
@@ -379,6 +381,10 @@ def main():
     tiles_dir = Path(args.tiles)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
+    existing_names = None
+    if args.skip_existing:
+        existing_names = {path.name for path in out_dir.rglob("*.png")}
+        print(f"Indexed {len(existing_names)} existing PNG files for --skip-existing")
 
     tile_files = sorted(tiles_dir.glob("*/*.png"))
     print(f"Found {len(tile_files)} tile files in {tiles_dir}")
@@ -418,7 +424,7 @@ def main():
     tasks = [
         (
             str(tiles_dir), x, y, args.dilate, args.min_pixels, str(out_dir),
-            args.tile_size, not args.no_cache, args.skip_existing, args.max_files_per_dir,
+            args.tile_size, not args.no_cache, args.skip_existing, args.max_files_per_dir, existing_names,
         )
         for x, y in task_coords
     ]
@@ -528,6 +534,7 @@ def main():
                         available_tiles=available_tiles,
                         collect_outputs=True,
                         max_files_per_dir=task[9],
+                        existing_names=task[10],
                     )
                     for out_path, crop in pending_outputs:
                         drain_save_queue(block_until_room=False)
@@ -541,6 +548,7 @@ def main():
                         skip_existing=task[8],
                         available_tiles=available_tiles,
                         max_files_per_dir=task[9],
+                        existing_names=task[10],
                     )
                 
                 accumulate_tile_result(tile_result)
