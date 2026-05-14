@@ -58,17 +58,20 @@ class InterProcessLock:
             pass
 
 
-def allocate_output_path(out_dir: Path, out_name: str, max_files_per_dir: int) -> Path:
+def allocate_output_path(out_dir: Path, out_name: str, max_files_per_dir: int, skip_existing: bool = False) -> Path | None:
     """
     保存先ディレクトリをmax_files_per_dir件ごとに分割して返す。
+    skip_existing=True かつ out_name が既存なら None を返す。
     ルート配下に artworks_part_00001 のような連番ディレクトリを作る。
     """
-    if max_files_per_dir <= 0:
-        return out_dir / out_name
-
     meta_path = out_dir / ".dir_split_state.json"
     lock_path = out_dir / ".dir_split_state.lock"
     with InterProcessLock(lock_path):
+        if skip_existing and any(out_dir.glob(f"**/{out_name}")):
+            return None
+
+        if max_files_per_dir <= 0:
+            return out_dir / out_name
         if meta_path.exists():
             with meta_path.open("r", encoding="utf-8") as fp:
                 state = json.load(fp)
@@ -117,6 +120,7 @@ class TileResult:
     pixels_painted: int = 0
     phase_ms: dict = field(default_factory=dict)
     save_queue_depth: int = 0
+    queued_outputs: int = 0
 
 
 def _load_tile_impl(path):
@@ -205,11 +209,15 @@ def process_tile(
         result.skipped_empty = 1
         result.elapsed_ms = int((perf_counter() - start) * 1000)
         return result
-    # central tileのサイズ確定
+    # central tileのサイズ確認（正方形タイル前提）
     h, w = central[0].shape[:2]
-    if h != tile_size or w != tile_size:
-        # 想定外サイズの場合は使う
-        tile_size = h
+    if h != w:
+        print(f"[ERROR] non-square tile at ({x}, {y}): actual size={w}x{h}")
+        result.errors = 1
+        result.elapsed_ms = int((perf_counter() - start) * 1000)
+        return result
+    if h != tile_size:
+        print(f"[WARN] tile size mismatch at ({x}, {y}): expected={tile_size}, actual={w}x{h}")
 
     t0 = perf_counter()
     big, big_mask = build_mosaic(
@@ -289,20 +297,26 @@ def process_tile(
         world_x = x * tile_size + (x0 - tile_size)
         world_y = y * tile_size + (y0 - tile_size)
         out_name = f"art_x{world_x}_y{world_y}_w{x1 - x0}_h{y1 - y0}.png"
+
         if skip_existing and existing_names is not None and out_name in existing_names:
-            result.skipped_existing += 1
-            continue
-        out_path = allocate_output_path(out_dir, out_name, max_files_per_dir)
+          out_path = allocate_output_path(
+              out_dir, out_name, max_files_per_dir, skip_existing=skip_existing
+          )
+          if out_path is None:
+              result.skipped_existing += 1
+              continue
         if collect_outputs:
             pending_outputs.append((out_path, crop))
+            result.queued_outputs += 1
         else:
             t1 = perf_counter()
             Image.fromarray(crop, "RGBA").save(out_path)
             t_save += perf_counter() - t1
+      
         if existing_names is not None:
             existing_names.add(out_name)
-        result.saved += 1
-        result.components_saved += 1
+            result.saved += 1
+            result.components_saved += 1
         result.pixels_painted += pixels
     result.elapsed_ms = int((perf_counter() - start) * 1000)
     result.phase_ms = {
@@ -321,6 +335,10 @@ def save_artwork(out_path, crop):
     t0 = perf_counter()
     Image.fromarray(crop, "RGBA").save(out_path)
     return int((perf_counter() - t0) * 1000)
+
+
+def save_artwork_for_tile(tile_key, out_path, crop):
+    return tile_key, save_artwork(out_path, crop)
 
 
 def init_worker(available_tiles):
@@ -353,7 +371,7 @@ def main():
                    help="px dilation radius for grouping nearby pixels (default 3)")
     p.add_argument("--min-pixels", type=int, default=64,
                    help="minimum painted pixels to count as an artwork (filters noise)")
-    p.add_argument("--tile-size", type=int, default=1000, help="tile pixel size (default 1000)")
+    p.add_argument("--tile-size", type=int, default=1000, help="tile pixel size (square tiles only, default 1000)")
     p.add_argument("--workers", type=int, default=os.cpu_count(),
                    help="number of worker processes (default: os.cpu_count(), 1 = serial)")
     p.add_argument("--save-workers", type=int, default=1,
@@ -446,6 +464,7 @@ def main():
             "components_saved": tile_result.components_saved,
             "pixels_painted": tile_result.pixels_painted,
             "save_queue_depth": tile_result.save_queue_depth,
+            "queued_outputs": tile_result.queued_outputs,
             "phase_ms": tile_result.phase_ms,
         }
         with runlog_path.open("a", encoding="utf-8") as fp:
@@ -477,7 +496,7 @@ def main():
     total = TileResult()
     failed_tiles = []
     slow_tiles = []
-    total_save_ms = 0
+    total_save_completed_ms = 0
     save_workers = max(0, args.save_workers)
     async_save_enabled = save_workers > 1 and args.workers == 1
     if args.save_workers > 1 and args.workers != 1:
@@ -485,6 +504,7 @@ def main():
 
     save_executor = ThreadPoolExecutor(max_workers=save_workers) if async_save_enabled else None
     inflight_saves = set()
+    save_future_to_tile = {}
 
     progress_bar = tqdm(total=len(tasks), desc="Extracting artworks", unit="tile")
 
@@ -494,16 +514,26 @@ def main():
         progress_bar.refresh()
 
     def drain_save_queue(block_until_room=False):
-        nonlocal total_save_ms
+        nonlocal total_save_completed_ms
         while inflight_saves and (block_until_room or len(inflight_saves) >= args.save_queue_max):
             done, _ = wait(inflight_saves, return_when=FIRST_COMPLETED)
             for fut in done:
                 inflight_saves.remove(fut)
+                tile_key = save_future_to_tile.pop(fut, None)
                 try:
-                    total_save_ms += fut.result()
+                    completed_tile_key, save_ms = fut.result()
+                    total_save_completed_ms += save_ms
+                    total.saved += 1
+                    total.components_saved += 1
+                    if completed_tile_key in async_tile_states:
+                        async_tile_states[completed_tile_key]["saved"] += 1
                 except Exception as e:
                     total.errors += 1
+                    if tile_key in async_tile_states:
+                        async_tile_states[tile_key]["errors"] += 1
                     print(f"[ERROR] async save failed: {e}")
+                if tile_key in async_tile_states:
+                    maybe_flush_async_runlog(tile_key)
             if not block_until_room:
                 break
 
@@ -519,6 +549,21 @@ def main():
         total.components_total += tile_result.components_total
         total.components_saved += tile_result.components_saved
         total.pixels_painted += tile_result.pixels_painted
+
+    async_tile_states = {}
+
+    def maybe_flush_async_runlog(tile_key):
+        state = async_tile_states.get(tile_key)
+        if state is None or state["logged"]:
+            return
+        if (state["saved"] + state["errors"]) < state["expected"]:
+            return
+        tr = state["result"]
+        tr.saved = state["saved"]
+        tr.components_saved = state["saved"]
+        tr.errors += state["errors"]
+        append_runlog(tr)
+        state["logged"] = True
 
     if args.workers == 1:
         for i, task in enumerate(tasks, 1):
@@ -536,10 +581,22 @@ def main():
                         max_files_per_dir=task[9],
                         existing_names=task[10],
                     )
+                    tile_key = (tile_result.x, tile_result.y)
+                    async_tile_states[tile_key] = {
+                        "result": tile_result,
+                        "expected": tile_result.queued_outputs,
+                        "saved": 0,
+                        "errors": 0,
+                        "logged": False,
+                    }
                     for out_path, crop in pending_outputs:
                         drain_save_queue(block_until_room=False)
-                        inflight_saves.add(save_executor.submit(save_artwork, out_path, crop))
+                        fut = save_executor.submit(save_artwork_for_tile, tile_key, out_path, crop)
+                        inflight_saves.add(fut)
+                        save_future_to_tile[fut] = tile_key
                     tile_result.save_queue_depth = len(inflight_saves)
+                    accumulate_tile_result(tile_result)
+                    maybe_flush_async_runlog(tile_key)
                 else:
                     tile_result = process_tile(
                         Path(task[0]), task[1], task[2], task[3], task[4], Path(task[5]), task[6],
@@ -550,9 +607,9 @@ def main():
                         max_files_per_dir=task[9],
                         existing_names=task[10],
                     )
-                
-                accumulate_tile_result(tile_result)
-                append_runlog(tile_result)
+                    accumulate_tile_result(tile_result)
+                    append_runlog(tile_result)
+
                 slow_tiles.append(tile_result)
             except Exception as e:
                 print(f"[ERROR] tile ({x}, {y}) failed: {e}")
@@ -586,6 +643,8 @@ def main():
     if save_executor is not None:
         drain_save_queue(block_until_room=True)
         save_executor.shutdown(wait=True)
+        for tile_key in list(async_tile_states):
+            maybe_flush_async_runlog(tile_key)
 
     if tasks:
         maybe_report_progress(len(tasks), len(tasks), force=True)
@@ -607,7 +666,7 @@ def main():
         f"components_total={total.components_total}, "
         f"components_saved={total.components_saved}, "
         f"pixels_painted={total.pixels_painted}"
-        f", save_ms={total_save_ms} "
+        f", save_completed_ms={total_save_completed_ms} "
         f"throughput_tiles_per_sec={throughput:.2f}"
     )
     if args.verbose and slow_tiles:
@@ -634,7 +693,7 @@ def main():
             "components_total": total.components_total,
             "components_saved": total.components_saved,
             "pixels_painted": total.pixels_painted,
-            "save_ms": total_save_ms,
+            "save_completed_ms": total_save_completed_ms,
             "failed_tiles": failed_tiles,
         }
         stats_path = Path(args.stats_json)
